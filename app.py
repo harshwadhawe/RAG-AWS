@@ -37,6 +37,21 @@ app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_BYTES if not ON_LAMBDA else 6 * 10
 
 # Single source of truth for product branding -- changing the name is one edit
 # here (or one env var), not a search-and-replace across templates.
+# Tracing on Lambda: the API key is fetched from SSM at cold start rather than
+# passed as a Terraform-managed environment variable, so the secret never enters
+# terraform.tfstate. Locally it comes from .env.local instead.
+LANGSMITH_KEY_PARAM = os.environ.get('LANGSMITH_API_KEY_PARAM', '')
+if LANGSMITH_KEY_PARAM and not os.environ.get('LANGSMITH_API_KEY'):
+    try:
+        os.environ['LANGSMITH_API_KEY'] = boto3.client(
+            'ssm', region_name=REGION
+        ).get_parameter(Name=LANGSMITH_KEY_PARAM, WithDecryption=True)['Parameter']['Value']
+    except Exception as exc:  # tracing is never worth failing a request over
+        print(json.dumps({'event': 'tracing_key_unavailable', 'error': str(exc)}))
+        os.environ.pop('LANGSMITH_TRACING', None)
+
+TRACING_ON = os.environ.get('LANGSMITH_TRACING', '').lower() == 'true'
+
 APP_NAME = os.environ.get('APP_NAME', 'Paper Trail')
 APP_TAGLINE = os.environ.get('APP_TAGLINE', 'Answers from your documents, with receipts.')
 SOURCE_URL = os.environ.get('SOURCE_URL', 'https://github.com/harshwadhawe/RAG-AWS')
@@ -162,6 +177,30 @@ def query_rag(query_text: str, session_id: str):
     print(json.dumps({'event': 'query', **metrics}))
 
     return response_text, sources, metrics
+
+@app.teardown_request
+def _flush_traces(exception=None):
+    """Ship spans before the Lambda container freezes.
+
+    LangSmith batches on a background thread, and Lambda suspends the container
+    the moment the response is returned -- so without an explicit flush the
+    spans for the request that just ran are simply lost. The cost is a network
+    round-trip on the request path, which is why tracing is a deliberate opt-in
+    rather than always-on.
+    """
+    if not (TRACING_ON and ON_LAMBDA):
+        return
+    try:
+        # get_cached_client() returns the instance @traceable buffers into.
+        # `Client()` would construct a NEW client and flush its empty queue --
+        # the spans would still be sitting on the tracer's client when the
+        # container froze, which is exactly how runs end up stuck "pending"
+        # in the UI: the start was sent, the end never was.
+        from langsmith.run_trees import get_cached_client
+        get_cached_client().flush()
+    except Exception as exc:
+        print(json.dumps({'event': 'trace_flush_failed', 'error': str(exc)}))
+
 
 @app.route('/', methods=['GET', 'POST'])
 def home():
@@ -303,4 +342,7 @@ def upload_page():
 if __name__ == '__main__':
     # Nothing to create: state lives in S3 Vectors, uploads are staged in a
     # temp dir per request. The app writes nothing durable to local disk.
-    app.run(debug=True)
+    #
+    # Port 5000 by default, but overridable: macOS binds it to AirPlay Receiver
+    # (ControlCenter), so a browser may reach AirPlay instead of Flask.
+    app.run(debug=True, port=int(os.environ.get('PORT', '5000')))

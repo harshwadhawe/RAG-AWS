@@ -137,7 +137,10 @@ Four `@traceable` decorators produce a nested run tree: `query_rag` (chain) → 
 - **Valid `run_type` values are `{llm, prompt, parser, tool, chain, embedding, retriever}`.** An invalid one (e.g. `embedder`) only *warns* at runtime, so a mistyped span on an unexercised path ships silently.
 - `name=` takes a string, not a callable.
 - Enabled by `LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY`; a no-op otherwise (~12 us per call).
-- **Off by default on Lambda.** The exporter batches on a background thread that the freeze kills, so spans vanish unless `wait_for_all_tracers()` runs before the handler returns. A failed export logs and continues -- it never fails the request.
+- **Flushing is mandatory on Lambda, and must target the right client.** The exporter batches on a background thread the freeze kills, so `teardown_request` calls `get_cached_client().flush()`. Two traps here, both hit in practice:
+  - `wait_for_all_tracers()` does **not** exist in langsmith >= 0.11 (it was the LangChain-era name).
+  - `Client()` constructs a **new** client and flushes its empty queue. `@traceable` buffers into `run_trees.get_cached_client()`; flushing anything else leaves runs stuck **"pending"** in the UI -- start delivered, end never sent. A pending run is a flush bug, not an instrumentation bug.
+- The key comes from an SSM SecureString read at cold start (`LANGSMITH_API_KEY_PARAM`), so it never enters terraform.tfstate. A failed fetch disables tracing and logs; a failed export logs and continues. Neither ever fails a request.
 - Do not decorate hot inner loops (per-chunk embedding); the per-call cost is only negligible at per-request frequency.
 
 For an always-on audit independent of tracing, enable Bedrock model invocation logging in Terraform -- it captures every prompt and completion account-wide with no code, but only sees *model* calls, so retrieval never appears there.

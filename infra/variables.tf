@@ -81,3 +81,28 @@ variable "session_ttl_minutes" {
   type        = number
   default     = 60
 }
+
+variable "local_dev_origins" {
+  description = <<-EOT
+    Extra CORS origins allowed to POST uploads straight to S3. Needed because
+    uploads bypass the app and go browser -> S3, so the browser's own origin
+    must be allowed. Set to [] for a deployment with no local development.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
+variable "langsmith_key_parameter" {
+  description = <<-EOT
+    Name of an SSM SecureString holding the LangSmith API key. The Lambda reads
+    it at cold start, so Terraform never sees the value and it stays out of
+    terraform.tfstate. Create it out of band:
+
+      aws ssm put-parameter --name /llama-rag/langsmith-api-key \
+        --type SecureString --value lsv2_pt_...
+
+    Leave empty to disable tracing in the deployed app.
+  EOT
+  type        = string
+  default     = ""
+}

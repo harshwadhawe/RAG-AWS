@@ -9,3 +9,6 @@ infra/.terraform/
 infra/*.tfstate*
 deploy/build/
 deploy/app.zip
+
+# personal, gitignored -- survives `terraform output > .env`
+.env.local

@@ -39,12 +39,18 @@ resource "aws_s3_bucket_lifecycle_configuration" "uploads" {
   }
 }
 
-# The browser POSTs from the Function URL origin, so S3 needs to allow it.
+# Uploads go browser -> S3 directly, so S3 must allow the page's origin. The
+# deployed Function URL plus local development ports: without the local entries,
+# uploading from `python app.py` fails at the browser with an opaque network
+# error ("Load failed" in Safari), because the request never reaches our code.
 resource "aws_s3_bucket_cors_configuration" "uploads" {
   bucket = aws_s3_bucket.uploads.id
   cors_rule {
     allowed_methods = ["POST"]
-    allowed_origins = [trimsuffix(aws_lambda_function_url.app.function_url, "/")]
+    allowed_origins = concat(
+      [trimsuffix(aws_lambda_function_url.app.function_url, "/")],
+      var.local_dev_origins,
+    )
     allowed_headers = ["*"]
     max_age_seconds = 3000
   }

@@ -88,6 +88,13 @@ resource "aws_lambda_function" "app" {
       UPLOAD_BUCKET    = aws_s3_bucket.uploads.bucket
       MAX_UPLOAD_MB    = tostring(var.max_upload_mb)
       FLASK_SECRET_KEY = random_password.flask_secret.result
+
+      # Tracing. Only the SSM parameter *name* travels through Terraform -- the
+      # Lambda reads the key itself at cold start, so the secret never lands in
+      # terraform.tfstate.
+      LANGSMITH_TRACING       = var.langsmith_key_parameter == "" ? "false" : "true"
+      LANGSMITH_API_KEY_PARAM = var.langsmith_key_parameter
+      LANGSMITH_PROJECT       = var.project
     }
   }
 
@@ -103,4 +110,26 @@ resource "aws_lambda_function_url" "app" {
   # API Gateway cannot stream responses; Function URLs can. Streaming is what
   # makes generation latency feel acceptable once the UI sends tokens through.
   invoke_mode = "RESPONSE_STREAM"
+}
+
+# Read-only access to the single SecureString holding the tracing key. Scoped to
+# that parameter, plus the KMS decrypt the SecureString type requires.
+data "aws_iam_policy_document" "tracing" {
+  count = var.langsmith_key_parameter == "" ? 0 : 1
+
+  statement {
+    actions   = ["ssm:GetParameter"]
+    resources = ["arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${var.langsmith_key_parameter}"]
+  }
+  statement {
+    actions   = ["kms:Decrypt"]
+    resources = ["arn:aws:kms:${var.region}:${data.aws_caller_identity.current.account_id}:alias/aws/ssm"]
+  }
+}
+
+resource "aws_iam_role_policy" "tracing" {
+  count  = var.langsmith_key_parameter == "" ? 0 : 1
+  name   = "${var.project}-tracing"
+  role   = aws_iam_role.lambda.id
+  policy = data.aws_iam_policy_document.tracing[0].json
 }

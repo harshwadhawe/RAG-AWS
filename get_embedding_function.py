@@ -8,6 +8,10 @@ from dotenv import load_dotenv
 from langsmith import traceable
 
 load_dotenv()
+# Personal settings that `deploy/publish.sh` must never overwrite: it regenerates
+# .env wholesale from Terraform outputs. Loaded second and with override so it
+# wins, gitignored so keys stay local.
+load_dotenv(".env.local", override=True)
 
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "amazon.titan-embed-text-v2:0")

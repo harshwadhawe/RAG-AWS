@@ -244,7 +244,7 @@ Click the `retriever` span to see exactly which chunks were retrieved and at wha
 
 **LangSmith's tracing was never LangChain-specific.** `@traceable` decorates any Python function, so the retrieval path stays framework-free while still producing the same trace view a LangChain application gives.
 
-Tracing is **off by default in production**: it costs an egress call per request, and LangSmith's background exporter is killed by the Lambda freeze unless `wait_for_all_tracers()` is called before returning. Enable it per-invocation when debugging. Overhead when disabled is ~12 µs per decorated call — 36 µs against a ~780 ms request.
+Tracing is **off by default in production**: it costs an egress call per request, and LangSmith's background exporter is killed by the Lambda freeze, so spans are flushed explicitly in `teardown_request`. It is now enabled in the deployed app, with the key read from SSM at cold start. Overhead when disabled is ~12 µs per decorated call — 36 µs against a ~780 ms request.
 
 For an always-on in-account audit, Amazon Bedrock **model invocation logging** records every prompt and completion with zero code and zero package weight (Terraform: `aws_bedrock_model_invocation_logging_configuration`; set `embedding_data_delivery_enabled = false` or every Titan call logs a 1024-float array).
 

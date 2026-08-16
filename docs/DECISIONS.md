@@ -380,7 +380,18 @@ The first instinct was to hand-roll request-id correlation and a chunk-level log
 
 **Cost.** ~12 µs per decorated call when disabled -- 36 µs against a ~780 ms request. Not free, but irrelevant at per-request frequency; it would matter on a hot loop.
 
-**Off by default in production.** The exporter batches on a background thread the Lambda freeze kills, so spans are lost without an explicit `wait_for_all_tracers()`. Enabled per-invocation for debugging. An export failure logs and continues rather than failing the request -- verified with a deliberately invalid API key.
+**Enabled in production**, with the key in an SSM SecureString read at cold start so it stays out of terraform.tfstate, and an explicit flush in `teardown_request`.
+
+Two SDK details cost a debugging round each, and neither is discoverable from the API's shape -- both required introspecting the installed package:
+
+| Assumed | Actual |
+|---|---|
+| `wait_for_all_tracers()` | Removed in langsmith >= 0.11; it was the LangChain-era name |
+| `Client().flush()` | Constructs a *new* client and flushes an empty queue. `@traceable` buffers into `run_trees.get_cached_client()` |
+
+The second produced runs stuck **"pending"**: the run start was delivered, the run end was not. That signature always means a flush problem rather than bad instrumentation.
+
+The flush adds a round-trip on the request path -- the deliberate cost of tracing being on. An export failure logs and continues, verified with an invalid API key.
 
 **Career note.** This keeps *LangSmith* on the CV while preserving the LangChain-removal narrative, which is the stronger interview answer: frameworks used where they earn their place, with measurements for both directions.
 
