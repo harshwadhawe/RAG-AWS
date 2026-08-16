@@ -1,11 +1,20 @@
-"""Generate the architecture diagram with official AWS service icons.
+"""Generate the architecture diagrams with official AWS service icons.
 
     brew install graphviz && uv pip install diagrams
     uv run python docs/diagram.py
 
-Writes docs/architecture.png. Deliberately NOT in requirements.txt --
-deploy/build.sh installs that file straight into the Lambda zip, and this is a
-dev-only tool.
+Writes three PNGs into docs/, one per concern:
+
+    architecture_query.png   answering a question
+    architecture_ingest.png  getting documents into the index
+    architecture_ops.png     lifecycle, delivery, and telemetry
+
+Split deliberately. One diagram covering all three needed ~20 edges across six
+clusters, and graphviz routed them into a tangle that hid the architecture it
+was meant to show. Each concern is legible on its own.
+
+Deliberately NOT in requirements.txt -- deploy/build.sh installs that file
+straight into the Lambda zip, and this is a dev-only tool.
 
 Regenerate whenever the architecture changes; a committed PNG that no longer
 matches the code is worse than no diagram.
@@ -13,12 +22,12 @@ matches the code is worse than no diagram.
 
 from diagrams import Cluster, Diagram, Edge
 from diagrams.aws.compute import Lambda
-
+from diagrams.aws.devtools import Codepipeline
 from diagrams.aws.integration import Eventbridge
-from diagrams.aws.management import Cloudwatch
+from diagrams.aws.management import Cloudformation, Cloudwatch, SystemsManagerParameterStore
 from diagrams.aws.ml import Bedrock
 from diagrams.aws.network import Endpoint
-
+from diagrams.aws.security import IAMRole
 from diagrams.aws.storage import S3
 from diagrams.onprem.client import User
 
@@ -27,73 +36,110 @@ GRAPH_ATTR = {
     # White, not transparent: a transparent PNG on GitHub's dark theme renders
     # the dark title and labels against dark grey, effectively invisible.
     "bgcolor": "white",
-    "pad": "1.0",       # breathing room around the whole canvas
-    "nodesep": "1.2",   # space between nodes on the same rank
-    "ranksep": "2.2",   # space between ranks -- the main readability lever
-    "splines": "ortho", # right-angle routing reads cleanly for infrastructure
-    "concentrate": "false",
+    "pad": "1.0",
+    "nodesep": "0.9",
+    "ranksep": "1.6",
 }
-NODE_ATTR = {"fontsize": "13", "margin": "0.3,0.25"}
+NODE_ATTR = {"fontsize": "13", "margin": "0.25,0.2"}
 EDGE_ATTR = {"fontsize": "12"}
 
-# Query path (green), upload path (orange), control plane (blue), telemetry (grey)
-Q = lambda label: Edge(color="#2E7D32", penwidth="2.2", label=label, fontcolor="#2E7D32")
-U = lambda label: Edge(color="#C2410C", penwidth="2.6", label=label, fontcolor="#C2410C")
-C = lambda label: Edge(color="#1565C0", penwidth="1.8", style="dashed", label=label, fontcolor="#1565C0")
-O = lambda label: Edge(color="#757575", penwidth="1.4", style="dotted", label=label, fontcolor="#757575")
+QUERY = "#2E7D32"
+UPLOAD = "#C2410C"
+CONTROL = "#1565C0"
 
-with Diagram(
-    "Paper Trail — serverless RAG on AWS",
-    filename="docs/architecture",
-    outformat="png",
-    show=False,
-    direction="LR",
-    graph_attr=GRAPH_ATTR,
-    node_attr=NODE_ATTR,
-    edge_attr=EDGE_ATTR,
-):
+
+def edge(color, label="", **kw):
+    return Edge(color=color, fontcolor=color, label=label, penwidth="2.0", **kw)
+
+
+def diagram(title, filename):
+    return Diagram(
+        title,
+        filename=f"docs/{filename}",
+        outformat="png",
+        show=False,
+        direction="LR",
+        graph_attr=GRAPH_ATTR,
+        node_attr=NODE_ATTR,
+        edge_attr=EDGE_ATTR,
+    )
+
+
+# --- 1. Answering a question -------------------------------------------------
+
+with diagram("Query path — answering a question", "architecture_query"):
     user = User("Browser\nsigned cookie: sid")
 
-    with Cluster("AWS · us-east-1 · provisioned by Terraform"):
+    with Cluster("AWS · us-east-1"):
+        url = Endpoint("Function URL\nauth NONE · streaming")
+        web = Lambda("web\nFlask + Lambda Web Adapter")
 
-        url = Endpoint("Function URL\nauth NONE · RESPONSE_STREAM")
+        # Declared last-step-first: graphviz stacks same-rank nodes bottom-up,
+        # so this reads 2-3-4 top to bottom. A Bedrock cluster box would group
+        # the two models but force them adjacent, putting the vector search
+        # outside the steps numbered around it.
+        llm = Bedrock("Bedrock · Llama 4 Scout\ntemperature 0")
+        vectors = S3("S3 Vectors\nfilter: session_id")
+        titan = Bedrock("Bedrock · Titan\nEmbeddings V2 · 1024-d")
 
-        with Cluster("Compute · arm64 · one zip · three handlers"):
-            web = Lambda("web\nFlask + LWA\n1 GB · 120 s")
-            ingest = Lambda("ingest\npypdf → chunk 800/80\n1 GB · 900 s")
-            cleanup = Lambda("cleanup\nexpire sessions\n512 MB · 300 s")
+    user >> edge(QUERY, "1  question") >> url
+    url >> edge(QUERY) >> web
+    web >> edge(QUERY, "2  embed query") >> titan
+    web >> edge(QUERY, "3  top-k  (×4 over-fetch)") >> vectors
+    web >> edge(QUERY, "4  prompt + context") >> llm
+    # constraint=false: without it the return edge makes the browser a
+    # *downstream* rank, and graphviz folds the whole left-to-right flow back
+    # on itself.
+    web >> edge(QUERY, "5  answer + citations", style="dashed",
+                constraint="false") >> user
 
+
+# --- 2. Getting documents in -------------------------------------------------
+
+with diagram("Ingestion path — uploads bypass Lambda", "architecture_ingest"):
+    user = User("Browser")
+
+    with Cluster("AWS · us-east-1"):
+        web = Lambda("web\nsigns the upload policy")
+        raw = S3("Raw uploads\nincoming/{sid}/\ncontent-length-range")
+        ingest = Lambda("ingest\npypdf · chunk 800/80")
+        # Declared last-step-first; graphviz stacks same-rank nodes bottom-up.
+        vectors = S3("S3 Vectors\nkey: sid:file:page:idx")
+        titan = Bedrock("Bedrock · Titan\nEmbeddings V2")
+
+    # decorate: the browser's three edges span different rank distances, so
+    # graphviz stacks their labels into one column where the eye pairs each
+    # label with the wrong arrow. The leader lines make the pairing explicit.
+    deco = {"decorate": "true"}
+    user >> edge(UPLOAD, "A  request an upload URL", **deco) >> web
+    web >> edge(UPLOAD, "B  presigned POST policy", style="dashed", **deco) >> user
+    user >> edge(UPLOAD, "C  bytes straight to S3 —\nthey never enter a Lambda", **deco) >> raw
+    raw >> edge(UPLOAD, "D  ObjectCreated") >> ingest
+    ingest >> edge(UPLOAD, "E  embed chunks", **deco) >> titan
+    ingest >> edge(UPLOAD, "F  upsert") >> vectors
+
+
+# --- 3. Operations -----------------------------------------------------------
+
+with diagram("Operations — lifecycle, delivery, telemetry", "architecture_ops"):
+    with Cluster("Delivery"):
+        tf = Cloudformation("Terraform\ninfra/")
+        ci = Codepipeline("GitHub Actions\nOIDC · eval gate")
+
+    with Cluster("AWS · us-east-1"):
         schedule = Eventbridge("EventBridge\nrate(15 min)")
+        cleanup = Lambda("cleanup\nexpire sessions > 60 min")
+        raw = S3("Raw uploads\n7-day lifecycle backstop")
+        vectors = S3("S3 Vectors\nsession's chunks")
+        role = IAMRole("Execution role\nno static keys")
+        param = SystemsManagerParameterStore("SSM SecureString\nLangSmith key\n(outside Terraform)")
+        logs = Cloudwatch("Logs\nJSON metrics per query")
 
-        with Cluster("Storage"):
-            raw = S3("Raw uploads\nincoming/{sid}/\nexpire 7 d (backstop)")
-            vectors = S3("S3 Vectors\n1024-d cosine\nkey: sid:file:page:idx")
+    schedule >> edge(CONTROL, "every 15 min") >> cleanup
+    cleanup >> edge(CONTROL, "delete expired") >> raw
+    cleanup >> edge(CONTROL) >> vectors
 
-        with Cluster("Amazon Bedrock"):
-            titan = Bedrock("Titan Embeddings V2\n1024-d")
-            llm = Bedrock("Llama 4 Scout\nConverse · temp 0")
-
-        logs = Cloudwatch("Logs\nJSON metrics/query")
-
-    # Only the edges that describe *structure*. The ordered request/upload
-    # sequences live in the sequence diagrams in the README -- forcing them in
-    # here produced 22 crossing edges and hid the architecture underneath.
-    user >> Q("questions") >> url
-    url >> Q("") >> web
-    user >> U("uploads direct\n(presigned POST)") >> raw
-    raw >> U("ObjectCreated") >> ingest
-
-    web >> Q("embed · generate") >> titan
-    web >> Q("") >> llm
-    web >> Q("search ×4 over-fetch\nfilter: session_id") >> vectors
-
-    ingest >> U("embed") >> titan
-    ingest >> U("upsert") >> vectors
-
-    schedule >> C("every 15 min") >> cleanup
-    cleanup >> C("expire > 60 min") >> raw
-    cleanup >> C("") >> vectors
-
-    web >> O("latency · tokens · cost") >> logs
-    ingest >> O("") >> logs
-    cleanup >> O("") >> logs
+    tf >> edge(CONTROL, "provisions", style="dashed") >> role
+    ci >> edge(CONTROL, "assume role · golden set", style="dashed") >> vectors
+    role >> edge(CONTROL, "read at cold start", style="dashed") >> param
+    role >> edge(CONTROL, "structured logs", style="dotted") >> logs
