@@ -10,8 +10,19 @@ from get_embedding_function import REGION, embed_texts
 
 load_dotenv()
 
-VECTOR_BUCKET = os.environ.get("VECTOR_BUCKET", "llama-rag-vectors")
+# No fallback for the bucket: a wrong-but-plausible default sends reads and
+# writes to an index that may not exist, or worse, to someone else's. Terraform
+# writes the real value into .env (local) and the Lambda environment (deployed).
+VECTOR_BUCKET = os.environ.get("VECTOR_BUCKET") or ""
 VECTOR_INDEX = os.environ.get("VECTOR_INDEX", "docs")
+
+
+def _require_bucket():
+    if not VECTOR_BUCKET:
+        raise RuntimeError(
+            "VECTOR_BUCKET is not set. Run `terraform output -raw env_file > .env` "
+            "from infra/, or set it in the environment."
+        )
 
 # S3 Vectors caps a single PutVectors request; batch well under it.
 PUT_BATCH = 100
@@ -19,6 +30,7 @@ PUT_BATCH = 100
 
 @lru_cache(maxsize=1)
 def _client():
+    _require_bucket()
     return boto3.client("s3vectors", region_name=REGION)
 
 

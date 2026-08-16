@@ -80,14 +80,14 @@ resource "aws_lambda_function" "app" {
       AWS_LWA_PORT            = "8080"
 
       # No AWS keys: boto3 picks up the execution role automatically.
-      VECTOR_BUCKET     = aws_s3vectors_vector_bucket.main.vector_bucket_name
-      VECTOR_INDEX      = aws_s3vectors_index.docs.index_name
-      EMBED_MODEL       = local.titan_model_id
-      EMBED_DIMENSION   = tostring(var.embedding_dimension)
-      LLM_MODEL         = var.llm_model_id
-      UPLOAD_BUCKET     = aws_s3_bucket.uploads.bucket
-      MAX_UPLOAD_MB     = tostring(var.max_upload_mb)
-      FLASK_SECRET_KEY  = random_password.flask_secret.result
+      VECTOR_BUCKET    = aws_s3vectors_vector_bucket.main.vector_bucket_name
+      VECTOR_INDEX     = aws_s3vectors_index.docs.index_name
+      EMBED_MODEL      = local.titan_model_id
+      EMBED_DIMENSION  = tostring(var.embedding_dimension)
+      LLM_MODEL        = var.llm_model_id
+      UPLOAD_BUCKET    = aws_s3_bucket.uploads.bucket
+      MAX_UPLOAD_MB    = tostring(var.max_upload_mb)
+      FLASK_SECRET_KEY = random_password.flask_secret.result
     }
   }
 

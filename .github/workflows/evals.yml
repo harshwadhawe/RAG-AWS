@@ -19,15 +19,41 @@ permissions:
   contents: read
 
 jobs:
+  # Always runs. Catches syntax, import, and Terraform errors with no AWS
+  # dependency, so the repo still gets a signal while infrastructure is down.
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv venv && uv pip install -r requirements.txt
+      - name: Import check
+        run: uv run python -c "import ast,pathlib; [ast.parse(pathlib.Path(f).read_text()) for f in ['app.py','ingest.py','populate_database.py','get_embedding_function.py','test_rag.py']]"
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform fmt + validate
+        working-directory: infra
+        run: terraform init -backend=false && terraform fmt -check && terraform validate
+
   golden-set:
     runs-on: ubuntu-latest
+    needs: static
+    # Teardown is a supported state for this project -- `terraform destroy`
+    # removes the index the evals run against. Skip rather than fail: a red X
+    # for "infrastructure is intentionally down" trains people to ignore CI.
+    if: vars.VECTOR_BUCKET != ''
+    # Values come from repository variables, pushed by deploy/publish.sh from
+    # Terraform outputs -- CI cannot read local Terraform state, and hardcoding
+    # them here means two sources of truth that silently drift apart.
     env:
-      AWS_REGION: us-east-1
-      VECTOR_BUCKET: llama-rag-vectors
-      VECTOR_INDEX: docs
-      EMBED_MODEL: amazon.titan-embed-text-v2:0
-      EMBED_DIMENSION: "1024"
-      LLM_MODEL: us.meta.llama4-scout-17b-instruct-v1:0
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      VECTOR_BUCKET: ${{ vars.VECTOR_BUCKET }}
+      VECTOR_INDEX: ${{ vars.VECTOR_INDEX }}
+      EMBED_DIMENSION: ${{ vars.EMBED_DIMENSION || '1024' }}
+      EMBED_MODEL: ${{ vars.EMBED_MODEL || 'amazon.titan-embed-text-v2:0' }}
+      LLM_MODEL: ${{ vars.LLM_MODEL || 'us.meta.llama4-scout-17b-instruct-v1:0' }}
 
     steps:
       - uses: actions/checkout@v4
