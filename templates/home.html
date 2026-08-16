@@ -1,0 +1,141 @@
+<!-- templates/home.html -->
+{% extends "base.html" %}
+{% block content %}
+<div class="content">
+    <h1>Welcome to LLAMA_LLM Chatbot</h1>
+
+    {% if not embeddings_created %}
+        <div class="upload-section">
+            <h2>Upload PDF Files</h2>
+            <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" onsubmit="showLoader()">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="file" name="pdf_files" multiple required><br><br>
+                <button type="submit" class="btn">Upload and Process</button>
+            </form>
+            <div id="loader" style="display:none;">
+                <p>Processing files... Please wait.</p>
+                <div class="spinner"></div>
+            </div>
+        </div>
+    {% else %}
+    <div class="button-container">
+        <button onclick="location.href='{{ url_for('home') }}';" class="btn">Home</button>
+        <button onclick="location.href='{{ url_for('upload_page') }}';" class="btn">Add Files</button>
+        <form action="{{ url_for('reset_rag') }}" method="post" onsubmit="return confirm('Are you sure you want to reset the RAG?');" style="display:inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn">Reset RAG</button>
+        </form>
+    </div>
+
+        <h2>Current Uploaded Files</h2>
+        <ul class="file-list">
+            {% for file in uploaded_files %}
+                <li>{{ file }}</li>
+            {% else %}
+                <li>No files uploaded.</li>
+            {% endfor %}
+        </ul>
+        <div class="chat-container">
+            <form id="question-form" onsubmit="return false;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="input-output-container">
+                    <textarea id="input-text" name="question" rows="15" placeholder="Enter your question here..." required></textarea>
+                    <textarea id="output-text" readonly>Response will appear here...</textarea>
+                </div>
+                <button type="submit" class="btn submit-btn">Submit</button>
+            </form>
+            <div id="loader" style="display:none;">
+                <p>Processing... Please wait.</p>
+                <div class="spinner"></div>
+            </div>
+            <div class="sources" style="display: none;">
+                <h3>Sources:</h3>
+                <ul></ul>
+            </div>
+        </div>
+    {% endif %}
+</div>
+
+<!-- JavaScript for AJAX submission -->
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const form = document.getElementById('question-form');
+        const inputText = document.getElementById('input-text');
+        const outputText = document.getElementById('output-text');
+        const sourcesContainer = document.querySelector('.sources');
+        const sourcesList = sourcesContainer ? sourcesContainer.querySelector('ul') : null;
+        const loader = document.getElementById('loader');
+
+        form.addEventListener('submit', function(event) {
+            event.preventDefault(); // Prevent default form submission
+            showLoader();
+
+            // Prepare data to send
+            const formData = new FormData();
+            formData.append('question', inputText.value);
+            // Include CSRF token
+            const csrfToken = document.querySelector('input[name="csrf_token"]').value;
+            formData.append('csrf_token', csrfToken);
+
+            // Send AJAX POST request
+            fetch('{{ url_for('ask_question') }}', {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRFToken': csrfToken
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                hideLoader();
+                outputText.value = data.response;
+
+                // Update sources
+                if (data.sources && data.sources.length > 0 && sourcesList) {
+                    sourcesList.innerHTML = ''; // Clear previous sources
+                    data.sources.forEach(source => {
+                        const li = document.createElement('li');
+                        li.textContent = source;
+                        sourcesList.appendChild(li);
+                    });
+                    sourcesContainer.style.display = 'block';
+                } else if (sourcesContainer) {
+                    sourcesContainer.style.display = 'none';
+                }
+            })
+            .catch(error => {
+                hideLoader();
+                console.error('Error:', error);
+                outputText.value = 'An error occurred. Please try again.';
+            });
+        });
+
+        // Show loader function
+        function showLoader() {
+            if (loader) {
+                loader.style.display = 'block';
+            }
+            // Disable submit button
+            const submitButton = form.querySelector('button[type="submit"]');
+            if (submitButton) {
+                submitButton.disabled = true;
+                submitButton.textContent = 'Processing...';
+            }
+        }
+
+        // Hide loader function
+        function hideLoader() {
+            if (loader) {
+                loader.style.display = 'none';
+            }
+            // Enable submit button
+            const submitButton = form.querySelector('button[type="submit"]');
+            if (submitButton) {
+                submitButton.disabled = false;
+                submitButton.textContent = 'Submit';
+            }
+        }
+    });
+</script>
+{% endblock %}

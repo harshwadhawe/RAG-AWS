@@ -1,0 +1,17 @@
+<!-- templates/upload.html -->
+{% extends "base.html" %}
+{% block content %}
+<div class="content">
+    <h2>Upload PDF Files</h2>
+    <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" onsubmit="showLoader()">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="file" name="pdf_files" multiple required><br><br>
+        <button type="submit" class="btn">Upload and Process</button>
+    </form>
+    
+    <div id="loader" style="display:none;">
+        <p>Processing files... Please wait.</p>
+        <div class="spinner"></div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,22 @@
+teminal 1 ->  ollama run llama3.2
+
+start terminal 2 -> 
+
+
+
+source testenv/bin/activate
+
+python3 populate_database.py --reset
+
+
+python3 query_data.py "How do I get out of jail in monopoly?"
+
+
+How much total money does a player start with in Monopoly? (Answer with the number only)
+
+How many points does the longest continuous train get in Ticket to Ride? (Answer with the number only)
+
+
+
+
+

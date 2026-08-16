@@ -1,0 +1,57 @@
+<!-- templates/base.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title | default("Home") }} - LLAMA_LLM Chatbot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <!-- Include Font Awesome for icons (optional) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
+</head>
+<body>
+    <header>
+        <nav>
+            <div class="logo">
+                <a href="{{ url_for('home') }}">LLAMA_LLM</a>
+            </div>
+            <ul class="nav-links">
+                <li><a href="{{ url_for('home') }}">Home</a></li>
+                <li><a href="#">Pricing</a></li>
+                <li><a href="#">FAQ</a></li>
+                <li><a href="#">About Us</a></li>
+            </ul>
+        </nav>
+    </header>
+    <main>
+        {% block content %}
+        {% endblock %}
+    </main>
+    <footer>
+        <ul class="footer-links">
+            <li><a href="#">Contact Us</a></li>
+            <!-- Add other footer links as needed -->
+        </ul>
+        <p>© LLAMA_LLM. All rights reserved.</p>
+    </footer>
+    <!-- Include JavaScript for loader functionality -->
+    <script>
+        function showLoader() {
+            var loader = document.getElementById('loader');
+            if (loader) {
+                loader.style.display = 'block';
+            }
+            // Disable submit buttons to prevent multiple submissions
+            var submitButtons = document.querySelectorAll('input[type="submit"], button[type="submit"]');
+            submitButtons.forEach(function(button) {
+                button.disabled = true;
+                // For <button>, change textContent; for <input>, change value
+                if (button.tagName.toLowerCase() === 'button') {
+                    button.textContent = 'Processing...';
+                } else {
+                    button.value = 'Processing...';
+                }
+            });
+        }
+    </script>
+</body>
+</html>

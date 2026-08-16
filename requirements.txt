@@ -1,0 +1,11 @@
+pypdf
+langchain
+langchain-ollama
+langchain-chroma
+langchain-community
+chromadb # Vector storage
+pytest
+boto3
+flask
+werkzeug
+Flask-WTF
