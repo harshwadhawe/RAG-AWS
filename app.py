@@ -7,7 +7,7 @@ from flask import jsonify
 from populate_database import process_pdfs_and_populate_database, clear_database
 from get_embedding_function import get_embedding_function
 from langchain_chroma import Chroma
-from langchain.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import OllamaLLM
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 

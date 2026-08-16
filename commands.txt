@@ -1,22 +1,17 @@
-teminal 1 ->  ollama run llama3.2
+terminal 1 ->  ollama pull nomic-embed-text   (once; llama3.2 cannot embed)
+               ollama run llama3.2
 
-start terminal 2 -> 
+terminal 2 ->
+
+uv venv
+uv pip install -r requirements.txt
+uv run python app.py
 
 
+Sample questions (after uploading the PDFs in data/):
 
-source testenv/bin/activate
-
-python3 populate_database.py --reset
-
-
-python3 query_data.py "How do I get out of jail in monopoly?"
-
+How do I get out of jail in Monopoly?
 
 How much total money does a player start with in Monopoly? (Answer with the number only)
 
 How many points does the longest continuous train get in Ticket to Ride? (Answer with the number only)
-
-
-
-
-

@@ -30,32 +30,28 @@ Local Processing: All data processing, and model inference are done locally in y
 
 ## Installation
 
-### Setting Up the Environment on macOS
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
-python3 -m venv testenv
+### Set up the environment and install libraries
 
-source testenv/bin/activate
+uv venv
 
-### Setting Up the Environment on Windows
-
-python3 -m venv testenv
-
-testenv\Scripts\activate
-
-
-### Get all python libraries
-
-pip install -r requirements.txt
-
+uv pip install -r requirements.txt
 
 ### Parallely run OLLAMA in second terminal
 
 Install OLLAMA locally first
 
+ollama pull nomic-embed-text
+
 ollama run llama3.2
+
+Two models are needed: `nomic-embed-text` for document embeddings (chat models like llama3.2 have no embedding head) and `llama3.2` for generating answers.
 
 ### Run FLASK application
 
-python app.py
+uv run python app.py
+
+(`uv run` uses `.venv` automatically — no activation needed.)
 
 
