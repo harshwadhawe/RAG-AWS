@@ -1,6 +1,8 @@
-# LLAMA_RAG
+# Paper Trail
 
-A serverless-ready Retrieval-Augmented Generation app on AWS: upload PDFs, ask questions, get answers grounded in your own documents with citations back to the source chunk.
+Upload PDFs, ask questions, get answers grounded in your own documents — every claim cited back to the passage it came from.
+
+A production-shaped serverless RAG system on AWS: session-isolated, evaluated, deployed, and torn down with one command each.
 
 Flask · Amazon S3 Vectors · Amazon Bedrock (Titan embeddings + Llama 4) · Terraform
 
@@ -143,48 +145,53 @@ Each case runs twice — once against retrieval alone, once end-to-end — so a 
 | ❌ | ❌ | Embeddings, chunking, or `k` — not generation |
 
 ```bash
-uv run pytest test_rag.py -v                # full suite — 11 tests, ~6s
-uv run pytest test_rag.py -k retrieval      # no LLM calls
+uv run pytest                          # everything — 21 tests
+uv run pytest test_behaviour.py        # 10 behaviour tests, ~0.3s, no AWS needed
+uv run pytest test_rag.py              # 11 golden-set tests, real Bedrock + S3 Vectors
 ```
 
-**Current state: 11/11 passing.** Run it before and after any change to the embedding model, chunk size, `k`, the prompt, or the vector store.
+**Current state: 21/21 passing.** Two suites with different jobs:
+
+| Suite | Speed | Needs AWS | Catches |
+|---|---|---|---|
+| `test_behaviour.py` | 0.3 s | no | contract breaks, session leakage, route behaviour |
+| `test_rag.py` | ~6 s | yes | retrieval and answer quality |
+
+The behaviour suite runs against in-memory fakes, so it gives real signal on every push even while the stack is torn down. Each test corresponds to a bug this project actually shipped — and each was verified to *fail* when its bug is reintroduced, because a suite that stays green on a broken app is worse than none.
+
+Run the golden set before and after any change to the embedding model, chunk size, `k`, the prompt, or the vector store.
 
 `conftest.py` prints the resolved region, index, embedding model, and LLM in the pytest header — eval numbers mean nothing without knowing which model produced them — and warns when a shell environment variable is shadowing `.env`.
 
 ## Setup
 
-Prerequisites: an AWS account, [Terraform](https://developer.hashicorp.com/terraform/install), [uv](https://docs.astral.sh/uv/getting-started/installation/), and admin AWS credentials configured (`aws configure`).
-
-**1. Provision infrastructure.** Creates the vector bucket and index, a least-privilege IAM user, and a monthly budget alert:
+Prerequisites: an AWS account, [Terraform](https://developer.hashicorp.com/terraform/install), [uv](https://docs.astral.sh/uv/getting-started/installation/), and AWS credentials for an **IAM user** (not the account root — AWS forbids root from assuming roles, which local development relies on).
 
 ```bash
-cd infra
-terraform init
-terraform apply -var="alert_email=you@example.com"
-terraform output -raw aws_profile >> ~/.aws/config   # one-time
-cd .. && ./deploy/publish.sh
+cd infra && terraform init && cd ..
+./deploy/deploy.sh                                   # build → apply → publish → verify
+terraform -chdir=infra output -raw aws_profile >> ~/.aws/config   # one-time
 ```
 
-**No long-lived credentials anywhere.** Lambda uses an execution role, CI uses GitHub OIDC, and local development assumes a least-privilege role through a named AWS profile — so `.env` holds configuration only (which bucket, which index, which models) and never a secret.
+`deploy.sh` runs the three steps in order and **fails if the deployed build doesn't match your HEAD commit** — Terraform reports "no changes" when the zip is stale, so without that check old code keeps serving silently.
 
-Don't `source .env`: it exports `AWS_PROFILE`, which then outranks your admin profile and makes Terraform fail with `AccessDenied` on IAM. The app loads it in-process via `python-dotenv`.
-
-Meta and Amazon Titan models need no Bedrock access request, so a bare `terraform apply` is sufficient. (Anthropic models require a one-time console opt-in — see [decision 6](docs/DECISIONS.md).)
-
-**2. Install and run:**
+Then run it locally against the same infrastructure:
 
 ```bash
-uv venv
-uv pip install -r requirements.txt
+uv venv && uv pip install -r requirements.txt
 uv run python app.py          # http://127.0.0.1:5000
 ```
 
-The home page reads the index directly, so if documents are already ingested you land straight on the chat UI — no upload needed, in any browser.
+**No long-lived credentials anywhere.** Lambda uses an execution role, CI uses GitHub OIDC, and local development assumes a least-privilege role via a named AWS profile — so `.env` holds configuration only (which bucket, which index, which models) and never a secret.
 
-**3. Tear down** when you're finished — this deletes everything, including stored vectors:
+Don't `source .env`: it exports `AWS_PROFILE`, which then outranks your admin profile and makes Terraform fail with `AccessDenied` on IAM. The app loads it in-process via `python-dotenv`.
+
+**Tear down** when you're finished — this deletes everything, including stored vectors:
 
 ```bash
-cd infra && terraform destroy
+cd infra && terraform destroy && cd ..
+./deploy/publish.sh --down      # marks the README as not deployed
+./deploy/verify_teardown.sh     # confirms nothing survived
 ```
 
 ## Cost
@@ -217,6 +224,21 @@ The build needs no Docker — `uv --python-platform aarch64-manylinux2014` produ
 
 **This endpoint is public and unauthenticated, and every request spends Bedrock tokens.** `reserved_concurrent_executions = 5` bounds concurrent spend, alongside the budget alarm. Set `max_concurrency = 0` to disable the function without tearing anything down. For more than a demo, put CloudFront + WAF rate rules in front.
 
+## Session isolation
+
+The endpoint is public, so one visitor must never see another's documents. Four mechanisms, three of them enforced by systems rather than by convention:
+
+| Layer | Enforced by |
+|---|---|
+| `sid` in the Flask cookie | **HMAC signature** — you cannot forge another session's id |
+| Retrieval scoping | **S3 Vectors server-side filter**, applied during search |
+| Upload path `incoming/{sid}/…` | **S3 presigned POST policy** pins the exact key |
+| Chunk id `{sid}:file:page:idx` | convention only — used for cleanup grouping, not a boundary |
+
+`session_id` is a **required positional argument** on `search()`, `list_sources()`, and `clear_database()`. A default of `None` meant a forgotten keyword silently answered one visitor from another's documents; now it's a `TypeError`. Genuinely-global access requires passing `ALL_SESSIONS` explicitly, which is deliberately conspicuous in review and used in exactly one place.
+
+Documents expire **60 minutes** after a session's last upload, swept by a scheduled Lambda every 15 minutes. Neither S3 lifecycle rules (day-granular) nor DynamoDB TTL (best-effort within ~48 h) can express an hour-scale policy — a scheduled sweep is the only mechanism with that precision. The 7-day lifecycle rule stays as a backstop.
+
 ## Stateless by design
 
 The app holds **no server-side state**, which is what makes it deployable across many short-lived instances:
@@ -224,7 +246,8 @@ The app holds **no server-side state**, which is what makes it deployable across
 - "Which documents exist" is answered by querying the vector index, not a session flag or a local directory
 - Uploads are staged in a temp directory and discarded — the vectors are the durable artifact
 - Chunk ids key on the document *name*, not its staging path, so re-uploading is a no-op on any instance
-- Flask sessions are signed client-side cookies; CSRF survives cold starts because Terraform generates a stable `FLASK_SECRET_KEY`
+- Flask sessions are signed client-side cookies; CSRF and session ids survive cold starts because Terraform generates a stable `FLASK_SECRET_KEY`
+- `GET /health` returns the git sha the running code was built from, so a stale deploy is detectable rather than silent
 
 ## Design decisions
 
@@ -236,7 +259,7 @@ The app holds **no server-side state**, which is what makes it deployable across
 
 | | |
 |---|---|
-| Evals | 11/11 (5 retrieval, 5 answer, 1 refusal) |
+| Tests | 21/21 (10 behaviour offline, 11 golden set on live AWS) |
 | Warm response | ~0.8 s end-to-end, including network |
 | Cold start | ~3.1 s init |
 | Dependencies | 52 packages / 62 MB (from 116 / 305 MB) |

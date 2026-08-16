@@ -14,6 +14,7 @@ matches the code is worse than no diagram.
 from diagrams import Cluster, Diagram, Edge
 from diagrams.aws.compute import Lambda
 
+from diagrams.aws.integration import Eventbridge
 from diagrams.aws.management import Cloudwatch
 from diagrams.aws.ml import Bedrock
 from diagrams.aws.network import Endpoint
@@ -38,10 +39,11 @@ EDGE_ATTR = {"fontsize": "12"}
 # Query path (green), upload path (orange), control plane (blue), telemetry (grey)
 Q = lambda label: Edge(color="#2E7D32", penwidth="2.2", label=label, fontcolor="#2E7D32")
 U = lambda label: Edge(color="#C2410C", penwidth="2.6", label=label, fontcolor="#C2410C")
+C = lambda label: Edge(color="#1565C0", penwidth="1.8", style="dashed", label=label, fontcolor="#1565C0")
 O = lambda label: Edge(color="#757575", penwidth="1.4", style="dotted", label=label, fontcolor="#757575")
 
 with Diagram(
-    "LLAMA_RAG — serverless RAG on AWS",
+    "Paper Trail — serverless RAG on AWS",
     filename="docs/architecture",
     outformat="png",
     show=False,
@@ -50,19 +52,22 @@ with Diagram(
     node_attr=NODE_ATTR,
     edge_attr=EDGE_ATTR,
 ):
-    user = User("Browser")
+    user = User("Browser\nsigned cookie: sid")
 
     with Cluster("AWS · us-east-1 · provisioned by Terraform"):
 
         url = Endpoint("Function URL\nauth NONE · RESPONSE_STREAM")
 
-        with Cluster("Compute · arm64 · one zip · one execution role"):
+        with Cluster("Compute · arm64 · one zip · three handlers"):
             web = Lambda("web\nFlask + LWA\n1 GB · 120 s")
             ingest = Lambda("ingest\npypdf → chunk 800/80\n1 GB · 900 s")
+            cleanup = Lambda("cleanup\nexpire sessions\n512 MB · 300 s")
+
+        schedule = Eventbridge("EventBridge\nrate(15 min)")
 
         with Cluster("Storage"):
-            raw = S3("Raw uploads\ncontent-length-range\nexpire 7 d")
-            vectors = S3("S3 Vectors\n1024-d cosine\nsource_text metadata")
+            raw = S3("Raw uploads\nincoming/{sid}/\nexpire 7 d (backstop)")
+            vectors = S3("S3 Vectors\n1024-d cosine\nkey: sid:file:page:idx")
 
         with Cluster("Amazon Bedrock"):
             titan = Bedrock("Titan Embeddings V2\n1024-d")
@@ -80,10 +85,15 @@ with Diagram(
 
     web >> Q("embed · generate") >> titan
     web >> Q("") >> llm
-    web >> Q("search ×4 over-fetch") >> vectors
+    web >> Q("search ×4 over-fetch\nfilter: session_id") >> vectors
 
     ingest >> U("embed") >> titan
     ingest >> U("upsert") >> vectors
 
+    schedule >> C("every 15 min") >> cleanup
+    cleanup >> C("expire > 60 min") >> raw
+    cleanup >> C("") >> vectors
+
     web >> O("latency · tokens · cost") >> logs
     ingest >> O("") >> logs
+    cleanup >> O("") >> logs

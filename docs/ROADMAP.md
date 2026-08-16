@@ -21,19 +21,21 @@ The engineering narrative is the differentiator, not the application. Most portf
 
 | Dimension | Standing | Evidence / gap |
 |---|---|---|
-| Deployment | Strong | Live Function URL, IaC, one-command teardown, no Docker in the build |
-| Evaluation discipline | Strong | Golden set with verified answers, baselines recorded across three migrations, retrieval/generation split |
-| Infrastructure | Strong | Terraform, least-privilege IAM, execution roles, no static keys in the deployed environment |
-| Cost engineering | Strong | 305 MB → 62 MB tied to a real constraint; budget alarm; expiring raw uploads |
-| Documentation | Strong | Decision records including reversed decisions |
-| Debugging evidence | Strong | Model-access diagnosis via admin credentials; credential shadowing; IAM eventual consistency; the over-fetch discovery |
+| Deployment | Strong | Live Function URL, IaC, one-command deploy with a stale-build check, one-command teardown |
+| Evaluation discipline | Strong | Golden set with verified answers, baselines across three migrations, retrieval/generation split, gated in CI |
+| Behaviour testing | Strong | 10 offline route tests, each verified to fail when its bug is reintroduced |
+| Session isolation | Strong | Server-side filtering, signed cookie, presigned key pinning; unsafe path is a TypeError |
+| Infrastructure | Strong | Terraform, least-privilege IAM, no static credentials anywhere (roles + OIDC) |
+| Cost engineering | Strong | 305 MB → 62 MB tied to a real constraint; budget alarm; per-request cost accounting; 60-min data expiry |
+| Observability | Moderate | Structured per-query JSON (latency split, tokens, cost) and `/health`; no distributed tracing |
+| Documentation | Strong | Decision records including reversed decisions and shipped bugs |
+| Debugging evidence | Strong | Over-fetch discovery, OIDC immutable-id subjects, credential shadowing, IAM eventual consistency |
+| Eval depth | Moderate | 6 golden cases, saturated by every model tested; no groundedness metric |
+| Retrieval sophistication | Moderate | Vector-only; no reranking, no hybrid BM25, no query rewriting |
+| Security posture | Moderate | Sessions isolated, credentials short-lived; still no auth or rate limiting on a paid endpoint |
 | **Concept novelty** | **Weak** | Most saturated category in the field |
 | **Agentic capability** | **Absent** | Single-turn retrieve-and-generate; no tool use, routing, or multi-step reasoning |
-| Observability | Weak | CloudWatch logs only; no tracing, no per-request token or cost accounting |
-| Retrieval sophistication | Moderate | Vector-only; no reranking, no hybrid BM25, no query rewriting |
-| Eval depth | Moderate | 6 cases, saturated by every model tested; no groundedness metric, no CI gate |
-| Security posture | Weak | Public endpoint, no auth or rate limiting, spends money per request |
-| Frontend | Weak | Original template; functional, dated |
+| Frontend | Weak | Functional, dated |
 
 ## The strongest asset
 
@@ -45,16 +47,19 @@ That is a production-debugging narrative with evidence attached, and it is worth
 
 Ordered by hiring signal per hour of work, not by technical interest.
 
-### 1. Eval gate in CI — ~1 hour
+### ~~1. Eval gate in CI~~ — done
 GitHub Actions running `pytest test_rag.py` on every PR, with the pass count in the job summary. "I gate merges on retrieval scores" is a sentence very few candidates can say truthfully. Cheapest signal available.
 
 Needs an AWS role for GitHub OIDC (no long-lived keys) — itself a credible infrastructure detail.
 
-### 2. Per-request cost and latency accounting — ~2 hours
+### ~~2. Per-request cost and latency accounting~~ — done
 Log input/output tokens and dollar cost per query; surface a table in the README. Job descriptions name inference latency and token cost explicitly, and nothing currently measures either at request granularity.
 
-### 3. Harden the public endpoint — ~1 hour
-Rate limiting or a shared secret in front of endpoints that spend money. Removes the most obvious criticism of an otherwise production-minded project.
+### 3. Authentication or rate limiting — ~1 hour
+Still the largest remaining gap. Session isolation stops visitors reading each other's documents, but anyone can still spend your Bedrock tokens. Reserved concurrency bounds throughput, not spend.
+
+### ~~3b. Session isolation and 60-minute expiry~~ — done
+Per-visitor scoping enforced server-side, plus a scheduled sweep. Isolates *data*, not *spend* — which is why #3 remains open.
 
 ### 4. Reranking, measured — ~3 hours
 `flashrank` cross-encoder: retrieve 20, rerank to 5, and record eval scores before and after. Converts the weakest technical dimension into a second measurement story, using the harness that already exists.
@@ -69,7 +74,7 @@ The largest differentiation move, and the one that changes the *category* rather
 Infrastructure already supports it (Function URL `RESPONSE_STREAM`); only `/ask_question` needs to emit SSE. Time-to-first-token currently equals time-to-full-answer.
 
 ### 8. Per-document scoping in the UI — ~2 hours
-`source` is already filterable metadata; the UI doesn't expose it, so every question searches the entire corpus and mixed-corpus queries retrieve across unrelated documents.
+`source` is already filterable metadata; the UI doesn't expose a picker, so a question searches every document in the session at once.
 
 ## Deliberately not doing
 

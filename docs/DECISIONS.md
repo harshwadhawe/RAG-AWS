@@ -12,7 +12,7 @@ The project started as a local Flask + LangChain + Chroma + Ollama demo and move
 
 **Why.** The starting app answered "How much money does each player start with in Monopoly?" with **$3,500**. The correct answer, present in the source PDF, is $1,500 — the PDF's OCR is garbled (`$100~`, `$50~`), so retrieval fed the model mangled denominations. Nothing in the app noticed. Every subsequent change (embedding model, vector store, LLM, framework removal) was going to alter answer quality, and without a baseline there would be no way to tell a regression from noise.
 
-**Evidence.** Every expected value was verified to exist in the corpus before being asserted on — an eval that asserts absent facts tests nothing. Baseline on the original stack: **6/6**. After removing LangChain: **6/6**. After migrating to AWS: **11/11**.
+**Evidence.** Every expected value was verified to exist in the corpus before being asserted on — an eval that asserts absent facts tests nothing. Baseline on the original stack: **6/6**. After removing LangChain: **6/6**. After migrating to AWS: **11/11**. Today, with the offline behaviour suite alongside it: **21/21**.
 
 **Consequence.** Every later decision could be settled by measurement instead of argument — most visibly the model choice (#7).
 
@@ -295,11 +295,75 @@ Routing uploads around Lambda removes both at once:
 
 ---
 
+## 17. Session isolation by metadata filter, not separate indexes
+
+**Decision.** One shared index; every vector carries a `session_id` and every query filters on it.
+
+**Why.** The endpoint is public and unauthenticated, so without scoping any visitor could read — and delete — any other visitor's documents. The alternative, an index per session, is a stronger boundary but wrong here: S3 Vectors caps at 10,000 indexes per bucket, index creation adds latency to a visitor's first upload, and cleanup becomes a lifecycle problem per index.
+
+Metadata filtering was nearly free because of an earlier decision: only `source_text` was declared non-filterable at index creation (#9), and filterable keys need no declaration — so `session_id` required **no index rebuild**.
+
+**Verified on the live index:** with two sessions present, a Monopoly question asked in the session holding only Ticket to Ride returned exclusively Ticket to Ride chunks. Filtered recall was *better* than unfiltered, because the filter narrows the candidate set before the ×4 over-fetch.
+
+**The hole this exposed.** `search(embedding, k=5, session_id=None)` defaulted to unfiltered — one forgotten keyword and a visitor's question is answered from everyone's documents, silently. `session_id` is now a **required positional argument**; opting out requires passing `ALL_SESSIONS` explicitly. The unsafe path is a `TypeError` rather than a data leak.
+
+**Not solved.** Session equals cookie: copying it grants access, and there is no authentication. Correct for a public demo, wrong for real documents.
+
+---
+
+## 18. Scheduled expiry, because neither lifecycle nor TTL is precise enough
+
+**Decision.** An EventBridge rule fires a cleanup Lambda every 15 minutes; it deletes the raw PDFs and vectors of any session idle longer than 60 minutes.
+
+**Why not the obvious mechanisms:**
+
+| Mechanism | Why it can't do this |
+|---|---|
+| S3 lifecycle rules | `Expiration` is expressed in **whole days**, minimum 1 |
+| DynamoDB TTL | Best-effort — AWS deletes "typically within 48 hours" of expiry, not at the timestamp |
+
+Both are garbage-collection hints, not schedulers. An hour-scale policy needs something that actually runs on a schedule.
+
+Expiry keys on a session's **most recent** upload, so an active visitor isn't swept mid-use. The 7-day lifecycle rule stays as a backstop if the schedule ever stops firing. No DynamoDB: S3 prefix listing plus the vector scan cover it at this scale, and a table would earn its place only when that scan gets slow — the same threshold at which `list_sources()` needs a manifest.
+
+---
+
+## 19. Behaviour tests over a BDD framework
+
+**Decision.** Given/When/Then *naming* in plain pytest (`test_behaviour.py`), against in-memory fakes in `conftest.py`. No `pytest-bdd`, no `behave`.
+
+**Why.** Gherkin's payoff is a shared vocabulary with non-technical stakeholders who read and write specs. Without those readers you pay for feature files and a step registry and get nothing back. BDD is a practice, not a tool — the naming carries the clarity on its own.
+
+The fakes are patched onto the **`app` module namespace**, because routes bind those names at import time; patching `populate_database` would have no effect.
+
+**Evidence they work.** Each test maps to a bug this project shipped, and each was verified to fail when its bug is reintroduced:
+
+| Reintroduced bug | Result |
+|---|---|
+| Reset skips deleting S3 files | ❌ that test only — 9 others still pass |
+| Upload page posts multipart to Lambda | ❌ that test only — 9 others still pass |
+
+A suite that stays green on a broken app is worse than no suite, so "does this fail for the right reason" is part of writing the test.
+
+**Cost:** 0.3 s, no AWS, no credentials — so it runs on every push even while the stack is torn down.
+
+---
+
+## 20. A build stamp, because tests cannot catch a stale deploy
+
+**Decision.** `build.sh` writes the git sha into the package; `/health` returns it; `deploy.sh` polls after applying and exits non-zero if the live version differs from HEAD.
+
+**Why.** Terraform tracks the Lambda package by `filebase64sha256`. If the zip wasn't rebuilt, the hash is unchanged, Terraform reports "no changes", and **the old code keeps serving with no error anywhere**. This shipped: an apply succeeded while the site served pre-rename templates, and the symptom surfaced as an unrelated 6 MB upload failure.
+
+No unit test can catch this — the code under test is correct; the code *deployed* is not. `deploy.sh` now runs build, apply, and publish in one command so the build cannot be skipped, and verifies the result rather than trusting it.
+
+---
+
 ## Known open issues
 
-- **No auth or per-IP rate limiting** in front of endpoints that make paid AWS calls; reserved concurrency bounds throughput only (#15).
+- **No auth or per-IP rate limiting** in front of endpoints that make paid AWS calls; reserved concurrency bounds throughput only (#15). Sessions isolate *data*, not *spend*.
 - **`list_sources()` scans all vector metadata** to answer "which documents exist". Fine for hundreds of documents; beyond that, keep a manifest in DynamoDB or a single S3 object.
-- **No per-document scoping in the UI.** Every question searches the whole corpus, so a vague question against a mixed corpus retrieves across unrelated documents. `source` is already filterable metadata — the UI just doesn't expose it.
+- **No per-document scoping in the UI.** Questions search everything in *your session*; `source` is already filterable metadata, the UI just doesn't expose a picker.
 - **The UI does not stream.** The infrastructure supports it (Function URL `RESPONSE_STREAM`), but `/ask_question` still returns a single JSON blob, so time-to-first-token is time-to-full-answer.
 - **No OCR.** Pages with no extractable text are skipped silently, so scanned PDFs contribute nothing.
 - **Root access keys.** The admin profile currently uses account root credentials, which AWS recommends deleting in favour of an IAM admin user.

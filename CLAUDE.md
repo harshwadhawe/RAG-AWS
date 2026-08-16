@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Provision AWS first — the app has no local fallback for embeddings, generation, or storage:
 
 ```bash
-cd infra && terraform apply && cd .. && ./deploy/publish.sh
+./deploy/deploy.sh                      # build -> apply -> publish -> verify version
 uv venv                                 # first time only
 uv pip install -r requirements.txt
 uv run python app.py                    # Flask dev server, debug=True
@@ -28,9 +28,11 @@ Terraform, not CDK — CDK's S3 Vectors support is L1 (`CfnVectorBucket`/`CfnInd
 ```bash
 cd infra
 terraform init
-terraform apply                             # email comes from terraform.tfvars (gitignored)
-cd .. && ./deploy/publish.sh                # .env, README link, CI variables
-terraform destroy                           # full teardown, no leftovers
+terraform init
+cd .. && ./deploy/deploy.sh                  # the only deploy command you need
+cd infra && terraform destroy && cd ..       # teardown
+./deploy/publish.sh --down                   # mark the README as not deployed
+./deploy/verify_teardown.sh                  # confirm nothing survived
 ```
 
 ⚠️ **Never `source .env` in your shell** — it causes two distinct failures, both silent.
@@ -72,11 +74,14 @@ Requires aws provider **>= 6.0** (`aws_s3vectors_*` resources; validated against
 ## Evals — run these before and after any retrieval change
 
 ```bash
-uv run pytest test_rag.py -v                # full suite, 11 tests, ~6s
-uv run pytest test_rag.py -k retrieval      # retrieval only: no LLM calls, no generation cost
+uv run pytest                          # everything: 21 tests
+uv run pytest test_behaviour.py        # 10 offline behaviour tests, ~0.3s, no AWS
+uv run pytest test_rag.py              # 11 golden-set tests against live AWS
 ```
 
-Current state: **11/11 passing** (5 retrieval + 5 answer + 1 refusal).
+Current state: **21/21 passing**.
+
+`test_behaviour.py` uses in-memory fakes (fixtures in `conftest.py`) patched onto the **`app` module namespace** -- the routes bind those names at import time, so patching `populate_database` would not affect them. Each test maps to a bug this project shipped; when adding one, verify it *fails* with the bug reintroduced before trusting it.
 
 Five factual questions whose answers were verified to exist in `data/monopoly.pdf` and `data/ticket_to_ride.pdf`, plus one out-of-corpus question that must be *declined* rather than answered. Each factual case runs twice:
 
@@ -96,8 +101,10 @@ Three modules, one flow: PDF → chunks → Titan embeddings → S3 Vectors → 
 | `app.py` | Flask routes + `query_rag()` (retrieval → prompt → generation) |
 | `populate_database.py` | The vector store: `process_pdfs_and_populate_database()`, `search()`, `clear_database()`, `chunk_documents()` |
 | `get_embedding_function.py` | Embeddings and the shared `REGION`: `embed_texts()` (thread-pooled — Titan takes one input per call), `embed_query()` (LRU-cached) |
-| `test_rag.py` | The golden set |
-| `conftest.py` | Prints resolved config in the pytest header; warns on `.env` shadowing |
+| `ingest.py` | Two Lambda handlers: `handler` (S3 event -> ingest), `cleanup_handler` (scheduled session expiry) |
+| `test_rag.py` | Golden set against live AWS |
+| `test_behaviour.py` | Offline route/behaviour tests |
+| `conftest.py` | Pytest header with resolved config, `.env`-shadowing warning, and the in-memory fakes |
 | `infra/` | Terraform: `main.tf`, `variables.tf`, `outputs.tf`, gitignored `terraform.tfvars` |
 
 All AWS config comes from `.env`, written by `deploy/publish.sh` from Terraform outputs. It holds no credentials — those come from the `AWS_PROFILE` role assumption. `VECTOR_BUCKET` has no fallback and raises if unset, rather than silently pointing at the wrong index.
@@ -123,6 +130,26 @@ A cross-region profile needs `bedrock:InvokeModel` on **both** the profile ARN *
 
 **Meta models need no access request; Anthropic models require a console opt-in** and return `403 ... is not available for this account` until granted. That is why this project defaults to Meta.
 
+### Session isolation
+
+The endpoint is public and unauthenticated, so every read and write is scoped to a `sid` held in the signed Flask cookie.
+
+- Chunk key: `{sid}:{source}:{page}:{index}` -- the sid prefix is what the cleanup sweep groups on
+- `session_id` is **filterable** metadata; only `source_text` was declared non-filterable at index creation, so this needed no index rebuild
+- `search()` passes `filter={"session_id": sid}`, applied server-side by S3 Vectors
+- Uploads land at `incoming/{sid}/{file}`; the presigned POST pins that exact key, so a client cannot write into another session
+- `ingest.py` recovers the sid from the S3 key -- it is triggered by S3 and never sees the cookie
+
+**`session_id` is a required positional argument** on `search()`, `list_sources()`, `clear_database()`, and `_scan()`. Pass `ALL_SESSIONS` (which is `None`) to opt out deliberately; only `cleanup_handler` does. This is why: a keyword with a `None` default meant one forgotten argument silently served every visitor's documents.
+
+The eval corpus lives in session `evals`, so visitor uploads cannot perturb golden-set results.
+
+### Session expiry
+
+`ingest.cleanup_handler` runs on an EventBridge schedule (every 15 min) and deletes the raw PDFs *and* vectors of any session whose most recent upload is older than `session_ttl_minutes` (default 60). Expiring by most-recent-upload avoids sweeping an active visitor mid-use.
+
+S3 lifecycle rules are day-granular and DynamoDB TTL is best-effort within ~48 h, so neither can express an hour-scale policy -- a scheduled sweep is the only mechanism with that precision. The 7-day lifecycle rule remains as a backstop if the schedule ever stops firing.
+
 ### Vector storage
 
 Chunk id (`source:page:index`) is the S3 Vectors **key**, so de-duplication is a `get_vectors` lookup on those keys rather than a scan. Metadata splits deliberately: `source_text` holds the chunk body and is declared **non-filterable** (filterable metadata is capped at 2 KB/vector); `source` and `page` stay filterable for future per-document queries.
@@ -133,23 +160,34 @@ Page numbers are 0-indexed. Because the id embeds the full filepath, the same PD
 
 Pages with no extractable text are skipped at load time, so a scanned/image-only PDF silently contributes nothing — there is no OCR step.
 
-### State lives in the Flask session, not the index
+### No server-side state
 
-The home page branches on `session['embeddings_created']`. A populated index with a fresh session still renders the upload form — the app has no way to notice existing vectors. Anything that changes ingestion or reset behavior must keep that session flag in sync (`session.modified = True` is required; the code sets it explicitly).
+The only thing in the Flask cookie is `sid` (plus the CSRF token). "Which documents exist" is answered by querying the index for that session, never by a flag — so any Lambda instance can serve any request, and a populated index is visible immediately in any browser that owns the session.
 
-`/reset_rag` calls `clear_database()` (which pages through `list_vectors` and deletes every key — the index itself is Terraform-managed and survives), empties `uploads/`, and clears the session.
+`/reset_rag` deletes **both** this session's vectors and its raw PDFs in S3. Deleting only the vectors leaves a confusing half-state: documents vanish from search but still occupy the bucket, and nothing re-ingests them because S3 events fire only on new objects.
 
 ### Routes
 
-`/` (GET question form, POST full-page answer) · `/upload` (GET form, POST ingest → redirect) · `/upload_page` (GET form only) · `/ask_question` (POST, JSON — this is what the home page's AJAX actually calls) · `/reset_rag` (POST).
-
-`/` POST and `/ask_question` both call `query_rag`; the form-based path on `/` is effectively dead since `home.html` intercepts submit and fetches `/ask_question`.
+| Route | Purpose |
+|---|---|
+| `/` | Chat UI, or the empty state when the session has no documents |
+| `/ask_question` | POST, JSON — what the UI actually calls; returns answer, sources, metrics |
+| `/upload_page` | The presigned-upload UI |
+| `/upload_url` | POST — issues a presigned S3 POST scoped to `incoming/{sid}/` |
+| `/documents` | JSON list of this session's indexed documents; polled during ingestion |
+| `/reset_rag` | POST — deletes this session's vectors and raw files |
+| `/health` | Build sha + model; used by `deploy.sh` to detect a stale deploy |
+| `/upload` | Legacy direct-to-Flask upload; only reachable when `UPLOAD_BUCKET` is unset (local dev) |
 
 Retrieval is `k=5` similarity search; the prompt (`PROMPT_TEMPLATE` in `app.py`) instructs answering *only* from context, so retrieval failures surface as refusals rather than hallucinations.
 
 ## Templates
 
-`base.html` defines a global `showLoader()`; `home.html` shadows it with its own `showLoader`/`hideLoader` pair inside a `DOMContentLoaded` handler. CSRF tokens come from the `inject_csrf_token` context processor and must be included as a hidden input in every form and as the `X-CSRFToken` header on fetch calls.
+Product naming comes from `APP_NAME` / `APP_TAGLINE` in `app.py` (overridable by env), injected via a context processor — changing the name is one edit, not a search-and-replace.
+
+`upload.html` drives the presigned flow entirely in JS: request a policy, POST the file to S3, then poll `/documents` until the document is indexed. **It must never contain a `multipart/form-data` form posting to the app** — that path hits Lambda's 6 MB invocation limit, and `test_behaviour.py` asserts against it.
+
+CSRF tokens come from the `inject_csrf_token` context processor and must be included as a hidden input in every form and as the `X-CSRFToken` header on fetch calls.
 
 ## Known rough edges
 
