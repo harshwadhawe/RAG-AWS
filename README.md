@@ -36,20 +36,23 @@ Dependencies went from **116 packages / 305 MB to 52 / 62 MB** — which is what
 
 ## Architecture
 
-```
-browser ──presigned POST──► S3 ──event──► ingest Lambda
-                                        │
-                     pypdf ──► chunk (800/80) ──► Titan Text Embeddings V2
-                                                            │
-                                                            ▼
-                                                   S3 Vectors index
-                                                    (1024-d, cosine)
-                                                            │
-question ──► Titan embed ──► top-k nearest ────────────────►┘
-                                   │
-                                   ▼
-                  Llama 4 Scout on Bedrock ──► grounded answer + sources
-```
+Everything inside the boundary is provisioned by Terraform. Two Lambdas share one deployment package and one execution role; no static AWS credentials exist anywhere in the deployed system.
+
+![Architecture](docs/architecture.png)
+
+*Generated from [`docs/diagram.py`](docs/diagram.py) — diagram as code, regenerate with `uv run python docs/diagram.py`.*
+
+**Green is the query path, orange is the upload path** — and they never meet. Uploads go browser → S3 directly and never traverse a Lambda invocation, so the 6 MB payload limit doesn't apply and embedding runs on a 900 s budget instead of an HTTP connection.
+
+| Component | Configuration |
+|---|---|
+| Function URL | `authorization_type NONE`, `invoke_mode RESPONSE_STREAM` |
+| Lambda `web` | arm64, 1 GB, 120 s, Lambda Web Adapter layer, execution role (no static keys) |
+| Lambda `ingest` | arm64, 1 GB, **900 s**, same zip, `ingest.handler` |
+| S3 raw uploads | presigned POST with `content-length-range`, objects expire after 7 days |
+| S3 Vectors | 1024-d, cosine, `source_text` non-filterable, queried with ×4 over-fetch |
+| Bedrock | `amazon.titan-embed-text-v2:0` · `us.meta.llama4-scout-17b-instruct-v1:0` at `temperature 0` |
+| CloudWatch | 14-day retention; one structured JSON metrics line per query |
 
 **Why S3 Vectors.** It is the cost-optimized tier, not the low-latency tier: AWS quotes ~100 ms for warm indexes and sub-second for cold ones, versus single-digit ms for an in-memory HNSW index — in exchange for roughly 90% lower cost than a traditional vector database. At this corpus size the vector lookup is nowhere near the dominant latency term (generation is), so the trade is free. A high-QPS consumer app would tier the hot subset into OpenSearch Serverless and keep the cold corpus here.
 

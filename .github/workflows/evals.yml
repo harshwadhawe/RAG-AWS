@@ -1,0 +1,85 @@
+name: evals
+
+# Retrieval quality is a merge gate, not a thing checked by hand. Every change
+# to chunking, embeddings, k, the prompt, or the model runs the golden set
+# before it can land.
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+# Evals hit real AWS and cost real (tiny) money -- don't run several at once.
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write # required to request the OIDC token
+  contents: read
+
+jobs:
+  golden-set:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      VECTOR_BUCKET: llama-rag-vectors
+      VECTOR_INDEX: docs
+      EMBED_MODEL: amazon.titan-embed-text-v2:0
+      EMBED_DIMENSION: "1024"
+      LLM_MODEL: us.meta.llama4-scout-17b-instruct-v1:0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Short-lived credentials from OIDC. No secrets beyond the role ARN,
+      # which is not itself sensitive.
+      - name: Assume AWS role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: evals-${{ github.run_id }}
+
+      - name: Install dependencies
+        run: |
+          uv venv
+          uv pip install -r requirements.txt
+
+      # Retrieval-only first: no model invocations, so a retrieval regression is
+      # caught in seconds without paying for generation. If the corpus is wrong,
+      # there is no point running the expensive half.
+      - name: Retrieval evals
+        run: uv run pytest test_rag.py -k retrieval -v --tb=short
+
+      - name: Full golden set
+        run: uv run pytest test_rag.py -v --tb=short --junit-xml=results.xml
+
+      - name: Summarise
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET, pathlib
+          f = pathlib.Path("results.xml")
+          if not f.exists():
+              print("## Evals\n\nNo results — the suite failed before reporting.")
+              raise SystemExit
+          s = ET.parse(f).getroot()
+          suite = s if s.tag == "testsuite" else s[0]
+          total = int(suite.get("tests", 0))
+          bad = int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+          print(f"## Evals\n\n**{total - bad}/{total} passing**\n")
+          for case in suite.iter("testcase"):
+              failed = case.find("failure") is not None or case.find("error") is not None
+              print(f"- {'❌' if failed else '✅'} `{case.get('name')}`")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results
+          path: results.xml

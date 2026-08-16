@@ -63,7 +63,7 @@ def test_retrieval_surfaces_fact(question, expected):
 
 @pytest.mark.parametrize("question,expected", CASES, ids=lambda v: v[:40] if isinstance(v, str) else "")
 def test_answer_contains_fact(question, expected):
-    answer, sources = query_rag(question)
+    answer, sources, _ = query_rag(question)
     got = normalize(answer)
     assert sources, "retrieval returned no sources"
     # Multi-value expectations are alternatives (any one is a correct answer);
@@ -74,7 +74,7 @@ def test_answer_contains_fact(question, expected):
 
 
 def test_declines_when_answer_not_in_corpus():
-    answer, _ = query_rag(OUT_OF_SCOPE)
+    answer, _, _ = query_rag(OUT_OF_SCOPE)
     got = normalize(answer)
     assert "canberra" not in got, f"hallucinated an out-of-corpus fact: {answer!r}"
     assert any(m in got for m in DECLINE_MARKERS), (

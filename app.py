@@ -2,8 +2,10 @@
 
 from flask import Flask, render_template, request, redirect, url_for
 from werkzeug.utils import secure_filename
+import json
 import os
 import tempfile
+import time
 from flask import jsonify
 import boto3
 from botocore.config import Config as BotoConfig
@@ -63,8 +65,36 @@ LLM_MODEL = os.environ.get('LLM_MODEL', 'us.meta.llama4-scout-17b-instruct-v1:0'
 bedrock = boto3.client('bedrock-runtime', region_name=REGION)
 
 
+# Token counts come from the API and are exact. Prices are configuration --
+# they drift, and a hardcoded guess quietly produces confident wrong numbers.
+# Titan Text Embeddings V2 is $0.02 per 1M input tokens in US regions; look up
+# the current generation rate at https://aws.amazon.com/bedrock/pricing/ and set
+# LLM_PRICE_IN/OUT_PER_1M. Unset means cost is reported as null, never guessed.
+EMBED_PRICE_PER_1M = float(os.environ.get('EMBED_PRICE_PER_1M', '0.02'))
+LLM_PRICE_IN_PER_1M = os.environ.get('LLM_PRICE_IN_PER_1M')
+LLM_PRICE_OUT_PER_1M = os.environ.get('LLM_PRICE_OUT_PER_1M')
+
+
+def _cost_usd(in_tokens, out_tokens, embed_tokens):
+    if LLM_PRICE_IN_PER_1M is None or LLM_PRICE_OUT_PER_1M is None:
+        return None
+    return round(
+        in_tokens / 1e6 * float(LLM_PRICE_IN_PER_1M)
+        + out_tokens / 1e6 * float(LLM_PRICE_OUT_PER_1M)
+        + embed_tokens / 1e6 * EMBED_PRICE_PER_1M,
+        8,
+    )
+
+
 def query_rag(query_text: str):
-    results = search(embed_query(query_text), k=5)
+    """Answer from the corpus. Returns (answer, source chunk ids, metrics)."""
+    started = time.perf_counter()
+
+    embedding = embed_query(query_text)
+    embedded_at = time.perf_counter()
+
+    results = search(embedding, k=5)
+    searched_at = time.perf_counter()
 
     context_text = "\n\n---\n\n".join(text for text, _, _ in results)
     prompt = PROMPT_TEMPLATE.format(context=context_text, question=query_text)
@@ -76,10 +106,31 @@ def query_rag(query_text: str):
         # writing -- we want the same answer for the same retrieved chunks.
         inferenceConfig={"maxTokens": 1024, "temperature": 0},
     )
+    finished = time.perf_counter()
+
     response_text = response["output"]["message"]["content"][0]["text"]
     sources = [chunk_id for _, chunk_id, _ in results]
+    usage = response.get("usage", {})
+    # Titan bills the query embedding; roughly 4 chars per token.
+    embed_tokens = max(1, len(query_text) // 4)
 
-    return response_text, sources
+    metrics = {
+        'embed_ms': round((embedded_at - started) * 1000, 1),
+        'search_ms': round((searched_at - embedded_at) * 1000, 1),
+        'generate_ms': round((finished - searched_at) * 1000, 1),
+        'total_ms': round((finished - started) * 1000, 1),
+        'input_tokens': usage.get('inputTokens'),
+        'output_tokens': usage.get('outputTokens'),
+        'chunks_retrieved': len(results),
+        'cost_usd': _cost_usd(usage.get('inputTokens', 0),
+                              usage.get('outputTokens', 0), embed_tokens),
+        'model': LLM_MODEL,
+    }
+    # One structured line per query: CloudWatch Logs Insights can aggregate p95
+    # latency and cost per model directly off this without extra instrumentation.
+    print(json.dumps({'event': 'query', **metrics}))
+
+    return response_text, sources, metrics
 
 @app.route('/', methods=['GET', 'POST'])
 def home():
@@ -91,7 +142,7 @@ def home():
 
     if uploaded_files and request.method == 'POST':
         question = request.form['question']
-        response, sources = query_rag(question)
+        response, sources, _ = query_rag(question)
         return render_template('home.html', embeddings_created=True, response=response,
                                sources=sources, question=question, uploaded_files=uploaded_files)
 
@@ -168,9 +219,8 @@ def reset_rag():
 @app.route('/ask_question', methods=['POST'])
 def ask_question():
     question = request.form['question']
-    response, sources = query_rag(question)
-    # Return a JSON response
-    return jsonify({'response': response, 'sources': sources})
+    response, sources, metrics = query_rag(question)
+    return jsonify({'response': response, 'sources': sources, 'metrics': metrics})
 
 
 @app.route('/upload_page', methods=['GET'])

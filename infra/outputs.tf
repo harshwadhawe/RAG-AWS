@@ -39,3 +39,8 @@ output "upload_bucket" {
   description = "Raw PDF landing bucket; objects expire after 7 days."
   value       = try(aws_s3_bucket.uploads.bucket, null)
 }
+
+output "github_ci_role_arn" {
+  description = "Set as the AWS_CI_ROLE_ARN GitHub Actions secret."
+  value       = try(aws_iam_role.github_ci[0].arn, null)
+}
