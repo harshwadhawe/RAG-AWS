@@ -14,6 +14,7 @@ from populate_database import (process_pdfs_and_populate_database, clear_databas
                                search, list_sources)
 from get_embedding_function import REGION, embed_query
 from flask_wtf.csrf import CSRFProtect, generate_csrf
+from langsmith import traceable
 
 app = Flask(__name__)
 # Must be stable across instances: Flask sessions are signed client-side cookies,
@@ -108,6 +109,19 @@ def current_session():
     return session['sid']
 
 
+@traceable(run_type="llm", name="bedrock_converse")
+def _generate(prompt: str):
+    """The model call, as its own span so tokens and latency attribute to it."""
+    return bedrock.converse(
+        modelId=LLM_MODEL,
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        # temperature 0: this is extraction from supplied context, not creative
+        # writing -- we want the same answer for the same retrieved chunks.
+        inferenceConfig={"maxTokens": 1024, "temperature": 0},
+    )
+
+
+@traceable(run_type="chain", name="query_rag")
 def query_rag(query_text: str, session_id: str):
     """Answer from the corpus. Returns (answer, source chunk ids, metrics)."""
     started = time.perf_counter()
@@ -121,13 +135,7 @@ def query_rag(query_text: str, session_id: str):
     context_text = "\n\n---\n\n".join(text for text, _, _ in results)
     prompt = PROMPT_TEMPLATE.format(context=context_text, question=query_text)
 
-    response = bedrock.converse(
-        modelId=LLM_MODEL,
-        messages=[{"role": "user", "content": [{"text": prompt}]}],
-        # temperature 0: this is extraction from supplied context, not creative
-        # writing -- we want the same answer for the same retrieved chunks.
-        inferenceConfig={"maxTokens": 1024, "temperature": 0},
-    )
+    response = _generate(prompt)
     finished = time.perf_counter()
 
     response_text = response["output"]["message"]["content"][0]["text"]

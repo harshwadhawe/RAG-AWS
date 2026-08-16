@@ -5,6 +5,7 @@ from functools import lru_cache
 
 import boto3
 from dotenv import load_dotenv
+from langsmith import traceable
 
 load_dotenv()
 
@@ -41,6 +42,7 @@ def embed_texts(texts):
         return list(pool.map(_embed_one, texts))
 
 
+@traceable(run_type="embedding", name="embed_query")
 @lru_cache(maxsize=512)
 def embed_query(text):
     """Embed a single query string. Cached -- repeat questions skip the model."""

@@ -1,5 +1,8 @@
 pypdf                    # PDF text extraction
 langchain-text-splitters # RecursiveCharacterTextSplitter (the one piece of langchain worth keeping)
+langsmith                # @traceable spans. Arrives via langchain-core anyway, but
+                         # declared because we depend on it directly -- a transitive
+                         # dep that upstream drops would break tracing silently.
 boto3                    # Titan embeddings, S3 Vectors, and Converse generation
 python-dotenv            # loads .env written by `terraform output`
 gunicorn                 # WSGI server behind the Lambda Web Adapter

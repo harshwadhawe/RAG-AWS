@@ -27,7 +27,7 @@ The engineering narrative is the differentiator, not the application. Most portf
 | Session isolation | Strong | Server-side filtering, signed cookie, presigned key pinning; unsafe path is a TypeError |
 | Infrastructure | Strong | Terraform, least-privilege IAM, no static credentials anywhere (roles + OIDC) |
 | Cost engineering | Strong | 305 MB → 62 MB tied to a real constraint; budget alarm; per-request cost accounting; 60-min data expiry |
-| Observability | Moderate | Structured per-query JSON (latency split, tokens, cost) and `/health`; no distributed tracing |
+| Observability | Strong | Nested LangSmith spans (chain/embedding/retriever/llm), per-query JSON metrics, `/health` build stamp |
 | Documentation | Strong | Decision records including reversed decisions and shipped bugs |
 | Debugging evidence | Strong | Over-fetch discovery, OIDC immutable-id subjects, credential shadowing, IAM eventual consistency |
 | Eval depth | Moderate | 6 golden cases, saturated by every model tested; no groundedness metric |
@@ -60,6 +60,9 @@ Still the largest remaining gap. Session isolation stops visitors reading each o
 
 ### ~~3b. Session isolation and 60-minute expiry~~ — done
 Per-visitor scoping enforced server-side, plus a scheduled sweep. Isolates *data*, not *spend* — which is why #3 remains open.
+
+### ~~3c. Tracing~~ — done
+`@traceable` spans, zero new dependencies. The remaining observability gap is a groundedness metric, not plumbing.
 
 ### 4. Reranking, measured — ~3 hours
 `flashrank` cross-encoder: retrieve 20, rerank to 5, and record eval scores before and after. Converts the weakest technical dimension into a second measurement story, using the harness that already exists.

@@ -359,6 +359,33 @@ No unit test can catch this — the code under test is correct; the code *deploy
 
 ---
 
+## 21. LangSmith tracing without LangChain
+
+**Decision.** Instrument with `@traceable` decorators from the `langsmith` SDK. Do not reintroduce LangChain, and do not build a custom tracer.
+
+**Why.** Per-call logging -- including Bedrock's own invocation logging -- shows the model call in isolation. It cannot show *retrieve → generate* as a parent-child span with timings, because the S3 Vectors query is not a model call and appears in no model log. Debugging a wrong answer needs the tree.
+
+The first instinct was to hand-roll request-id correlation and a chunk-level log. That was the wrong instinct: mature tooling exists, and the honest question was which of it fits *this* stack.
+
+**What was evaluated:**
+
+| Option | Verdict |
+|---|---|
+| **`langsmith` `@traceable`** | **Chosen.** Already installed via `langchain-core`; framework-agnostic; produces the same trace view a LangChain app gives |
+| OpenInference + Phoenix | Auto-instruments `converse()` and renders retriever spans well, but ~90 KB plus an OTel stack, and needs a collector to export to |
+| Langfuse | Comparable capability, 672 KB, another vendor |
+| Reintroducing LangChain | 13 packages to obtain callbacks available for free — reverses #2 |
+
+**Evidence.** Verified against the live index: four correctly-typed, correctly-nested spans from four decorators, zero new dependencies, package size unchanged at 29 MB. Evals pass with tracing both on and off.
+
+**Cost.** ~12 µs per decorated call when disabled -- 36 µs against a ~780 ms request. Not free, but irrelevant at per-request frequency; it would matter on a hot loop.
+
+**Off by default in production.** The exporter batches on a background thread the Lambda freeze kills, so spans are lost without an explicit `wait_for_all_tracers()`. Enabled per-invocation for debugging. An export failure logs and continues rather than failing the request -- verified with a deliberately invalid API key.
+
+**Career note.** This keeps *LangSmith* on the CV while preserving the LangChain-removal narrative, which is the stronger interview answer: frameworks used where they earn their place, with measurements for both directions.
+
+---
+
 ## Known open issues
 
 - **No auth or per-IP rate limiting** in front of endpoints that make paid AWS calls; reserved concurrency bounds throughput only (#15). Sessions isolate *data*, not *spend*.

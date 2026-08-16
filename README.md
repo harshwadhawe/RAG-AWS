@@ -224,6 +224,30 @@ The build needs no Docker — `uv --python-platform aarch64-manylinux2014` produ
 
 **This endpoint is public and unauthenticated, and every request spends Bedrock tokens.** `reserved_concurrent_executions = 5` bounds concurrent spend, alongside the budget alarm. Set `max_concurrency = 0` to disable the function without tearing anything down. For more than a demo, put CloudFront + WAF rate rules in front.
 
+## Tracing
+
+Every question produces a nested trace, from four `@traceable` decorators and **no new dependencies** — `langsmith` already ships with `langchain-core`:
+
+```
+query_rag  [chain]
+  └─ embed_query        [embedding]   Titan
+  └─ s3_vectors_search  [retriever]   chunks + distances
+  └─ bedrock_converse   [llm]         prompt, completion, tokens
+```
+
+```bash
+export LANGSMITH_TRACING=true LANGSMITH_API_KEY=ls__...
+uv run python app.py
+```
+
+Click the `retriever` span to see exactly which chunks were retrieved and at what distance; click `llm` for the prompt the model actually received. That is the "a user says the answer was wrong" workflow, and it is the piece that per-call logging structurally cannot provide — the S3 Vectors query is not a model call, so it appears in no model log.
+
+**LangSmith's tracing was never LangChain-specific.** `@traceable` decorates any Python function, so the retrieval path stays framework-free while still producing the same trace view a LangChain application gives.
+
+Tracing is **off by default in production**: it costs an egress call per request, and LangSmith's background exporter is killed by the Lambda freeze unless `wait_for_all_tracers()` is called before returning. Enable it per-invocation when debugging. Overhead when disabled is ~12 µs per decorated call — 36 µs against a ~780 ms request.
+
+For an always-on in-account audit, Amazon Bedrock **model invocation logging** records every prompt and completion with zero code and zero package weight (Terraform: `aws_bedrock_model_invocation_logging_configuration`; set `embedding_data_delivery_enabled = false` or every Titan call logs a 1024-float array).
+
 ## Session isolation
 
 The endpoint is public, so one visitor must never see another's documents. Four mechanisms, three of them enforced by systems rather than by convention:
@@ -260,6 +284,7 @@ The app holds **no server-side state**, which is what makes it deployable across
 | | |
 |---|---|
 | Tests | 21/21 (10 behaviour offline, 11 golden set on live AWS) |
+| Tracing | LangSmith spans, opt-in, 0 new dependencies |
 | Warm response | ~0.8 s end-to-end, including network |
 | Cold start | ~3.1 s init |
 | Dependencies | 52 packages / 62 MB (from 116 / 305 MB) |

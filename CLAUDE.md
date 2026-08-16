@@ -130,6 +130,18 @@ A cross-region profile needs `bedrock:InvokeModel` on **both** the profile ARN *
 
 **Meta models need no access request; Anthropic models require a console opt-in** and return `403 ... is not available for this account` until granted. That is why this project defaults to Meta.
 
+### Tracing
+
+Four `@traceable` decorators produce a nested run tree: `query_rag` (chain) → `embed_query` (embedding), `search` (retriever), `_generate` (llm). `langsmith` is declared in requirements.txt even though `langchain-core` pulls it in -- we depend on it directly, and a transitive dependency upstream drops is a silent breakage.
+
+- **Valid `run_type` values are `{llm, prompt, parser, tool, chain, embedding, retriever}`.** An invalid one (e.g. `embedder`) only *warns* at runtime, so a mistyped span on an unexercised path ships silently.
+- `name=` takes a string, not a callable.
+- Enabled by `LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY`; a no-op otherwise (~12 us per call).
+- **Off by default on Lambda.** The exporter batches on a background thread that the freeze kills, so spans vanish unless `wait_for_all_tracers()` runs before the handler returns. A failed export logs and continues -- it never fails the request.
+- Do not decorate hot inner loops (per-chunk embedding); the per-call cost is only negligible at per-request frequency.
+
+For an always-on audit independent of tracing, enable Bedrock model invocation logging in Terraform -- it captures every prompt and completion account-wide with no code, but only sees *model* calls, so retrieval never appears there.
+
 ### Session isolation
 
 The endpoint is public and unauthenticated, so every read and write is scoped to a `sid` held in the signed Flask cookie.

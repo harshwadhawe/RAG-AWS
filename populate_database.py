@@ -3,6 +3,7 @@ from functools import lru_cache
 
 import boto3
 from dotenv import load_dotenv
+from langsmith import traceable
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 
@@ -201,6 +202,7 @@ def _scan(session_id):
 OVERFETCH = 4
 
 
+@traceable(run_type="retriever", name="s3_vectors_search")
 def search(query_embedding, session_id, k=5):
     """Return [(text, key, distance)] for the k nearest chunks, best first.
 
