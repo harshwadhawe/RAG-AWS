@@ -161,11 +161,13 @@ Prerequisites: an AWS account, [Terraform](https://developer.hashicorp.com/terra
 cd infra
 terraform init
 terraform apply -var="alert_email=you@example.com"
-terraform output -raw env_file > ../.env
-cd ..
+terraform output -raw aws_profile >> ~/.aws/config   # one-time
+cd .. && ./deploy/publish.sh
 ```
 
-Two credentials are in play by design: your **admin** profile provisions the infrastructure, and the least-privilege **app** user that Terraform creates runs the application. Don't `source .env` — it exports the app credentials into your shell, where they outrank the admin profile and cause Terraform to fail with `AccessDenied` on IAM. The app loads `.env` in-process via `python-dotenv`.
+**No long-lived credentials anywhere.** Lambda uses an execution role, CI uses GitHub OIDC, and local development assumes a least-privilege role through a named AWS profile — so `.env` holds configuration only (which bucket, which index, which models) and never a secret.
+
+Don't `source .env`: it exports `AWS_PROFILE`, which then outranks your admin profile and makes Terraform fail with `AccessDenied` on IAM. The app loads it in-process via `python-dotenv`.
 
 Meta and Amazon Titan models need no Bedrock access request, so a bare `terraform apply` is sufficient. (Anthropic models require a one-time console opt-in — see [decision 6](docs/DECISIONS.md).)
 

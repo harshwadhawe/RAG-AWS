@@ -3,22 +3,21 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>{{ title | default("Home") }} - LLAMA_LLM Chatbot</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title | default("Ask") }} · {{ app_name }}</title>
+    <meta name="description" content="{{ app_tagline }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
-    <!-- Include Font Awesome for icons (optional) -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
 </head>
 <body>
     <header>
         <nav>
             <div class="logo">
-                <a href="{{ url_for('home') }}">LLAMA_LLM</a>
+                <a href="{{ url_for('home') }}">{{ app_name }}</a>
             </div>
             <ul class="nav-links">
-                <li><a href="{{ url_for('home') }}">Home</a></li>
-                <li><a href="#">Pricing</a></li>
-                <li><a href="#">FAQ</a></li>
-                <li><a href="#">About Us</a></li>
+                <li><a href="{{ url_for('home') }}">Ask</a></li>
+                <li><a href="{{ url_for('upload_page') }}">Add documents</a></li>
+                <li><a href="{{ source_url }}" target="_blank" rel="noopener">Source</a></li>
             </ul>
         </nav>
     </header>
@@ -27,11 +26,7 @@
         {% endblock %}
     </main>
     <footer>
-        <ul class="footer-links">
-            <li><a href="#">Contact Us</a></li>
-            <!-- Add other footer links as needed -->
-        </ul>
-        <p>© LLAMA_LLM. All rights reserved.</p>
+        <p>{{ app_name }} — {{ app_tagline }}</p>
     </footer>
     <!-- Include JavaScript for loader functionality -->
     <script>

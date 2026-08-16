@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Provision AWS first — the app has no local fallback for embeddings, generation, or storage:
 
 ```bash
-cd infra && terraform apply && terraform output -raw env_file > ../.env && cd ..
+cd infra && terraform apply && cd .. && ./deploy/publish.sh
 uv venv                                 # first time only
 uv pip install -r requirements.txt
 uv run python app.py                    # Flask dev server, debug=True
@@ -15,13 +15,11 @@ uv run python app.py                    # Flask dev server, debug=True
 
 Dependencies are managed with `uv` against `requirements.txt` (no pyproject.toml). `uv run` picks up `.venv` on its own — don't activate anything.
 
-The app serves at **http://127.0.0.1:5000**. There is no deployed instance yet — see Roadmap in the README.
+The app serves at **http://127.0.0.1:5000** locally, and is also deployed behind a Lambda Function URL (link in the README, written by `deploy/publish.sh`).
 
 There is no local model server and no local vector store; embeddings, generation, and storage are all AWS calls. Installed size is **62 MB / 52 packages** (down from 305 MB / 116 before chromadb, langchain, and the Anthropic SDK came out) — that budget is what makes a Lambda deploy viable, so weigh new dependencies against it.
 
 Ingestion happens through the web upload route; `populate_database.py`'s `__main__` is a no-op `pass`.
-
-⚠️ **The home page shows the upload form even when the index is already populated** — it gates on a Flask session flag, not on index contents (see *State lives in the Flask session*). Upload a PDF from `data/` to reach the chat UI; re-ingesting is a no-op thanks to chunk-id dedupe.
 
 ## AWS infrastructure (`infra/`)
 
@@ -31,7 +29,7 @@ Terraform, not CDK — CDK's S3 Vectors support is L1 (`CfnVectorBucket`/`CfnInd
 cd infra
 terraform init
 terraform apply                             # email comes from terraform.tfvars (gitignored)
-terraform output -raw env_file > ../.env    # writes AWS creds + resource names
+cd .. && ./deploy/publish.sh                # .env, README link, CI variables
 terraform destroy                           # full teardown, no leftovers
 ```
 
@@ -41,25 +39,25 @@ terraform destroy                           # full teardown, no leftovers
 
 | Exported var | Symptom |
 |---|---|
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Terraform runs as the least-privilege *app* user instead of your admin profile → `AccessDenied` on `iam:GetUser`, `s3vectors:ListTagsForResource`, `budgets:ViewBudget` |
+| `AWS_PROFILE` | Terraform runs as the least-privilege *dev* role instead of your admin profile → `AccessDenied` on `iam:GetUser`, `s3vectors:ListTagsForResource`, `budgets:ViewBudget` |
 | `LLM_MODEL` | `terraform output > .env` appears to work, but the app keeps calling the *old* model — the file changed, the exported value didn't |
 
 The app never needs the shell sourced; `python-dotenv` loads `.env` in-process. To recover a polluted shell:
 
 ```bash
-unset LLM_MODEL AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+unset LLM_MODEL AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 # or, per command:
-env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN terraform apply
+env -u AWS_PROFILE terraform apply
 ```
 
 `conftest.py` prints the resolved region, index, embedding model, and LLM in the pytest header, and warns when a shell export is shadowing `.env` — check it before trusting any eval result.
 
-Two credentials are in play by design: **admin** (your profile) provisions, **app** (created by Terraform) runs the application.
+Two identities by design: your **admin** profile provisions infrastructure; the least-privilege **`llama-rag` profile** (assuming the dev role Terraform creates) runs the application. Neither uses a static access key — `.env` holds configuration only.
 
 **IAM is eventually consistent.** Running the evals immediately after an apply that changed the policy can produce a one-off `AccessDenied` on an ARN the policy demonstrably grants. Give it ~30s and re-run before debugging. To tell a transient apart from a real misconfiguration, read the live policy rather than the Terraform source — a real gap shows up here, a transient does not:
 
 ```bash
-aws iam get-user-policy --user-name llama-rag-app --policy-name llama-rag-app
+aws iam get-role-policy --role-name llama-rag-lambda --policy-name llama-rag-lambda
 ```
 
 Do not add retry-on-AccessDenied to the app; it would mask genuine permission bugs for a condition that self-resolves in seconds.
@@ -68,7 +66,7 @@ Requires aws provider **>= 6.0** (`aws_s3vectors_*` resources; validated against
 
 - `force_destroy = true` on the vector bucket is load-bearing — without it `terraform destroy` fails while the index still holds vectors. It must be applied *before* the destroy is attempted.
 - Every `aws_s3vectors_index` argument forces replacement. Changing `dimension`, `distance_metric`, or `non_filterable_metadata_keys` silently destroys and rebuilds the index; all vectors are lost and must be re-ingested.
-- `terraform.tfstate` contains the IAM secret access key in plaintext. `infra/.gitignore` covers it — do not add a remote backend without encryption.
+- `terraform.tfstate` no longer contains any static credential (the IAM user and access key were replaced by assumable roles), but it still describes the whole deployment. `infra/.gitignore` covers it; use an encrypted backend if you ever move it remote.
 - **Bedrock model access cannot be provisioned by Terraform.** It's a console action (Bedrock → Model access). Meta and Amazon Titan need no request, which is why the current stack works from a bare `terraform apply`. Anthropic models require a one-time use-case form and return `403 ... is not available for this account` until granted — verified on this account with both app *and* admin credentials, so it is account-level, never IAM.
 
 ## Evals — run these before and after any retrieval change
@@ -102,7 +100,7 @@ Three modules, one flow: PDF → chunks → Titan embeddings → S3 Vectors → 
 | `conftest.py` | Prints resolved config in the pytest header; warns on `.env` shadowing |
 | `infra/` | Terraform: `main.tf`, `variables.tf`, `outputs.tf`, gitignored `terraform.tfvars` |
 
-All AWS config comes from `.env`, written by `terraform output -raw env_file`. Nothing is hardcoded except fallback defaults.
+All AWS config comes from `.env`, written by `deploy/publish.sh` from Terraform outputs. It holds no credentials — those come from the `AWS_PROFILE` role assumption. `VECTOR_BUCKET` has no fallback and raises if unset, rather than silently pointing at the wrong index.
 
 **No LangChain, one AWS SDK.** The pipeline calls `pypdf` and `boto3` directly — boto3 alone covers embeddings, vector storage, and generation. The only third-party piece kept is `langchain-text-splitters` for `RecursiveCharacterTextSplitter`, the one component with real logic. Do not reintroduce `langchain`, `langchain-community`, `langchain-chroma`, or `langchain-ollama` — the wrappers are one-liners here and were a live source of breakage across the 1.x migration. The `anthropic` SDK is also gone; Converse reaches Anthropic models too, when access allows.
 

@@ -33,9 +33,17 @@ MAX_UPLOAD_BYTES = int(os.environ.get('MAX_UPLOAD_MB', '64')) * 1024 * 1024
 app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_BYTES if not ON_LAMBDA else 6 * 1024 * 1024
 
 
+# Single source of truth for product branding -- changing the name is one edit
+# here (or one env var), not a search-and-replace across templates.
+APP_NAME = os.environ.get('APP_NAME', 'Paper Trail')
+APP_TAGLINE = os.environ.get('APP_TAGLINE', 'Answers from your documents, with receipts.')
+SOURCE_URL = os.environ.get('SOURCE_URL', 'https://github.com/harshwadhawe/RAG-AWS')
+
+
 @app.context_processor
-def inject_upload_limit():
-    return dict(max_upload_bytes=MAX_UPLOAD_BYTES)
+def inject_branding():
+    return dict(app_name=APP_NAME, app_tagline=APP_TAGLINE, source_url=SOURCE_URL,
+                max_upload_bytes=MAX_UPLOAD_BYTES)
 
 csrf = CSRFProtect(app)
 

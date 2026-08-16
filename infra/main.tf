@@ -117,18 +117,39 @@ data "aws_iam_policy_document" "app" {
   }
 }
 
-resource "aws_iam_user" "app" {
-  name = "${var.project}-app"
+# Local development assumes a role rather than holding a long-lived access key.
+#
+# This closes the last gap in the credential story: Lambda already uses an
+# execution role and CI already uses GitHub OIDC, so a static key on a laptop
+# was the only durable credential left -- and it lived in two places it should
+# not (a .env on disk and, worse, terraform.tfstate in plaintext).
+#
+# STS issues short-lived credentials instead, and there is nothing to rotate,
+# leak, or accidentally commit.
+data "aws_iam_policy_document" "dev_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type = "AWS"
+      # Delegates to the account: any IAM principal here that is itself granted
+      # sts:AssumeRole on this role can assume it.
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
 }
 
-resource "aws_iam_user_policy" "app" {
-  name   = "${var.project}-app"
-  user   = aws_iam_user.app.name
+resource "aws_iam_role" "dev" {
+  name                 = "${var.project}-dev"
+  assume_role_policy   = data.aws_iam_policy_document.dev_assume.json
+  max_session_duration = 3600
+}
+
+# Identical least-privilege policy as the Lambda execution role and CI role --
+# one policy document, three consumers, no drift between them.
+resource "aws_iam_role_policy" "dev" {
+  name   = "${var.project}-dev"
+  role   = aws_iam_role.dev.id
   policy = data.aws_iam_policy_document.app.json
-}
-
-resource "aws_iam_access_key" "app" {
-  user = aws_iam_user.app.name
 }
 
 # ---------------------------------------------------------------------------

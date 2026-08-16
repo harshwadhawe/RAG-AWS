@@ -56,7 +56,7 @@ check "function URL  $PROJECT" \
 echo
 echo "IAM"
 check "role   $PROJECT-lambda" aws iam get-role --role-name "$PROJECT-lambda"
-check "user   $PROJECT-app"    aws iam get-user --user-name "$PROJECT-app"
+check "role   $PROJECT-dev"    aws iam get-role --role-name "$PROJECT-dev"
 
 echo
 echo "CloudWatch"

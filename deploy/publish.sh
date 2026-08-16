@@ -52,6 +52,20 @@ cd ..
 replace_block "**[Live demo →]($URL)**"
 echo "==> README live demo link -> $URL"
 
+# Local app config. No credentials in here by design -- see the aws_profile
+# output; boto3 resolves short-lived credentials by assuming the dev role.
+(cd infra && terraform output -raw env_file) > .env
+echo "==> .env written ($(grep -c . .env) settings, no secrets)"
+
+PROFILE_NAME=$(grep -m1 '^AWS_PROFILE=' .env | cut -d= -f2)
+if ! aws configure list-profiles 2>/dev/null | grep -qx "$PROFILE_NAME"; then
+  echo
+  echo "!! AWS profile '$PROFILE_NAME' is not configured. Append this to ~/.aws/config:"
+  echo
+  (cd infra && terraform output -raw aws_profile) | sed 's/^/   /'
+  echo
+fi
+
 # GitHub Actions can't read local Terraform state, so push the values it needs.
 # Non-secret values become repository variables; only the role ARN is a secret.
 if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then

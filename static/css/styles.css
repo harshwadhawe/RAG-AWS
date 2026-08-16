@@ -129,3 +129,28 @@ button.btn:hover {
         font-size: 16px; 
     }
 }
+
+/* --- added with the rename: tagline, danger action, anchor-as-button --- */
+.tagline {
+    margin: -0.5rem 0 1.5rem;
+    color: #666;
+    font-size: 1.05rem;
+}
+
+/* The upload call-to-action is an <a>, so it needs the button's box model. */
+a.btn {
+    display: inline-block;
+    text-decoration: none;
+}
+
+/* Clearing the index is destructive and shouldn't look like the primary action. */
+.btn-danger {
+    background: transparent;
+    color: #c0392b;
+    border: 1px solid #c0392b;
+}
+
+.btn-danger:hover {
+    background: #c0392b;
+    color: #fff;
+}

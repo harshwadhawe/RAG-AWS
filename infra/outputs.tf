@@ -14,19 +14,34 @@ output "embedding_dimension" {
   value = aws_s3vectors_index.docs.dimension
 }
 
-# Run `terraform output -raw env_file > ../.env` to configure the app.
+# Written to ../.env by deploy/publish.sh.
+#
+# Contains NO credentials -- only which resources to talk to. AWS credentials
+# come from the standard provider chain (the `aws_profile` below), so this file
+# is not a secret and cannot leak anything durable if it is mishandled.
 output "env_file" {
-  description = "Ready-to-write .env contents for the application."
-  sensitive   = true
+  description = "Non-secret application config. Safe to write to disk."
   value       = <<-EOT
     AWS_REGION=${var.region}
-    AWS_ACCESS_KEY_ID=${aws_iam_access_key.app.id}
-    AWS_SECRET_ACCESS_KEY=${aws_iam_access_key.app.secret}
+    AWS_PROFILE=${var.project}
     VECTOR_BUCKET=${aws_s3vectors_vector_bucket.main.vector_bucket_name}
     VECTOR_INDEX=${aws_s3vectors_index.docs.index_name}
-    EMBED_MODEL=amazon.titan-embed-text-v2:0
+    UPLOAD_BUCKET=${aws_s3_bucket.uploads.bucket}
+    EMBED_MODEL=${local.titan_model_id}
     EMBED_DIMENSION=${aws_s3vectors_index.docs.dimension}
     LLM_MODEL=${var.llm_model_id}
+  EOT
+}
+
+# Append to ~/.aws/config. boto3 then calls STS to get short-lived credentials
+# scoped to the same least-privilege policy the Lambda runs under.
+output "aws_profile" {
+  description = "AWS CLI profile granting local dev the app's least-privilege role."
+  value       = <<-EOT
+    [profile ${var.project}]
+    role_arn = ${aws_iam_role.dev.arn}
+    source_profile = default
+    region = ${var.region}
   EOT
 }
 

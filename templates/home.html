@@ -2,45 +2,40 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="content">
-    <h1>Welcome to LLAMA_LLM Chatbot</h1>
+    <h1>{{ app_name }}</h1>
+    <p class="tagline">{{ app_tagline }}</p>
 
     {% if not embeddings_created %}
         <div class="upload-section">
-            <h2>Upload PDF Files</h2>
-            <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" onsubmit="showLoader()">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="file" name="pdf_files" multiple required><br><br>
-                <button type="submit" class="btn">Upload and Process</button>
-            </form>
-            <div id="loader" style="display:none;">
-                <p>Processing files... Please wait.</p>
-                <div class="spinner"></div>
-            </div>
+            <h2>No documents yet</h2>
+            <p>Add a PDF and every answer will cite the passage it came from.</p>
+            <!-- Links to the upload page rather than posting here: uploads go
+                 browser -> S3 via a presigned POST, which the upload page drives. -->
+            <a href="{{ url_for('upload_page') }}" class="btn">Add documents</a>
         </div>
     {% else %}
     <div class="button-container">
-        <button onclick="location.href='{{ url_for('home') }}';" class="btn">Home</button>
-        <button onclick="location.href='{{ url_for('upload_page') }}';" class="btn">Add Files</button>
-        <form action="{{ url_for('reset_rag') }}" method="post" onsubmit="return confirm('Are you sure you want to reset the RAG?');" style="display:inline;">
+        <button onclick="location.href='{{ url_for('upload_page') }}';" class="btn">Add documents</button>
+        <form action="{{ url_for('reset_rag') }}" method="post" onsubmit="return confirm('Delete every indexed document? This cannot be undone.');" style="display:inline;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn">Reset RAG</button>
+            <button type="submit" class="btn btn-danger">Clear index</button>
         </form>
     </div>
 
-        <h2>Current Uploaded Files</h2>
+        <h2>Indexed documents</h2>
         <ul class="file-list">
             {% for file in uploaded_files %}
                 <li>{{ file }}</li>
             {% else %}
-                <li>No files uploaded.</li>
+                <li>No documents indexed yet.</li>
             {% endfor %}
         </ul>
         <div class="chat-container">
             <form id="question-form" onsubmit="return false;">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <div class="input-output-container">
-                    <textarea id="input-text" name="question" rows="15" placeholder="Enter your question here..." required></textarea>
-                    <textarea id="output-text" readonly>Response will appear here...</textarea>
+                    <textarea id="input-text" name="question" rows="15" placeholder="Ask anything about your documents..." required></textarea>
+                    <textarea id="output-text" readonly>The answer will appear here, with its sources.</textarea>
                 </div>
                 <button type="submit" class="btn submit-btn">Submit</button>
             </form>

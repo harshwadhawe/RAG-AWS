@@ -147,6 +147,26 @@ The IAM consequence is non-obvious: a cross-region profile needs `bedrock:Invoke
 
 ---
 
+## 10a. No long-lived credentials anywhere
+
+**Decision.** Every consumer of the app's permissions gets short-lived credentials from a role. There are no static access keys.
+
+| Consumer | Credential |
+|---|---|
+| Lambda (web + ingest) | Execution role |
+| GitHub Actions | OIDC → assumed role, per job |
+| Local development | Named AWS profile → assumed role via STS |
+
+**What this replaced.** Terraform originally created an IAM *user* with an access key and wrote it to `.env`. That put a durable credential in two places it shouldn't be: a file on disk, and `terraform.tfstate` in plaintext. It was also the *only* static credential left — Lambda and CI were already role-based — so local dev was the odd one out rather than the norm.
+
+`.env` now carries only non-secret configuration (which bucket, which index, which models). It cannot leak anything durable.
+
+**Cost.** One extra setup step: appending the profile block from `terraform output -raw aws_profile` to `~/.aws/config`. `deploy/publish.sh` prints it when the profile is missing.
+
+**One policy document, three consumers** — `data.aws_iam_policy_document.app` is attached to the Lambda execution role, the CI role, and the dev role, so the three cannot drift apart.
+
+---
+
 ## 10. Two credentials by design
 
 **Decision.** An **admin** profile provisions infrastructure; a least-privilege **app** user created by Terraform runs the application.
@@ -170,7 +190,7 @@ The IAM consequence is non-obvious: a cross-region profile needs `bedrock:Invoke
 Adding retry logic would mask real permission bugs to paper over a condition that self-resolves in seconds. To distinguish the two, read the live policy rather than the Terraform source:
 
 ```bash
-aws iam get-user-policy --user-name llama-rag-app --policy-name llama-rag-app
+aws iam get-role-policy --role-name llama-rag-lambda --policy-name llama-rag-lambda
 ```
 
 ---
