@@ -11,6 +11,8 @@ variable "github_repo" {
 
 locals {
   enable_ci = var.github_repo != ""
+  gh_owner  = split("/", var.github_repo)[0]
+  gh_name   = try(split("/", var.github_repo)[1], "")
 }
 
 # One OIDC provider per account. If the account already has one for GitHub,
@@ -40,10 +42,21 @@ data "aws_iam_policy_document" "github_assume" {
     }
     # Scoped to this repository. Without this condition ANY GitHub repository
     # on the internet could assume the role.
+    #
+    # Two subject formats are accepted because GitHub now issues subjects that
+    # embed immutable numeric ids -- `repo:owner@123/name@456:ref:...` rather
+    # than `repo:owner/name:ref:...` -- so that renaming an org or repository
+    # cannot be used to hijack a trust policy written against the old name.
+    # Matching only the classic form fails with a bare
+    # "Not authorized to perform sts:AssumeRoleWithWebIdentity"; the real
+    # subject is visible in CloudTrail's AssumeRoleWithWebIdentity event.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:*"]
+      values = [
+        "repo:${var.github_repo}:*",                     # classic subject
+        "repo:${local.gh_owner}@*/${local.gh_name}@*:*", # immutable-id subject
+      ]
     }
   }
 }
