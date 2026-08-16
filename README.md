@@ -42,7 +42,67 @@ Everything inside the boundary is provisioned by Terraform. Two Lambdas share on
 
 *Generated from [`docs/diagram.py`](docs/diagram.py) — diagram as code, regenerate with `uv run python docs/diagram.py`.*
 
-**Green is the query path, orange is the upload path** — and they never meet. Uploads go browser → S3 directly and never traverse a Lambda invocation, so the 6 MB payload limit doesn't apply and embedding runs on a 900 s budget instead of an HTTP connection.
+**Green is the query path, orange is the upload path** — and they never meet.
+
+### Request flow — asking a question
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor B as Browser
+    participant W as Lambda · web
+    participant T as Titan Embeddings
+    participant V as S3 Vectors
+    participant L as Llama 4 Scout
+    participant C as CloudWatch
+
+    B->>W: POST /ask_question
+    W->>T: InvokeModel(question)
+    T-->>W: 1024-d vector
+    W->>V: QueryVectors topK = k×4, returnMetadata
+    Note over W,V: ANN returns ~half of topK,<br/>so k=5 needs topK=20
+    V-->>W: chunks + distances + source_text
+    W->>W: sort by distance, keep top 5
+    W->>L: Converse(prompt + context, temperature 0)
+    L-->>W: answer + token usage
+    W->>C: {"event":"query", latency, tokens, cost}
+    W-->>B: answer + source chunk ids + metrics
+```
+
+### Ingestion flow — uploading a document
+
+The presigned handshake is the part worth reading: the app signs an upload policy with its execution role, and the browser then sends the bytes **straight to S3**. Nothing large ever passes through a Lambda invocation.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor B as Browser
+    participant W as Lambda · web
+    participant S as S3 · raw uploads
+    participant I as Lambda · ingest
+    participant T as Titan Embeddings
+    participant V as S3 Vectors
+
+    B->>W: POST /upload_url {filename}
+    W->>W: sign policy with execution role<br/>content-length-range 1..64 MB
+    W-->>B: presigned POST url + fields
+    B->>S: POST file directly
+    Note over B,S: bytes never enter a Lambda invocation,<br/>so the 6 MB payload limit does not apply
+    S-->>B: 204 No Content
+    S->>I: ObjectCreated (prefix incoming/, suffix .pdf)
+    I->>S: GetObject
+    I->>I: pypdf extract, chunk 800/80
+    I->>T: embed chunks (thread pool)
+    I->>V: PutVectors, key = name:page:index
+    Note over I,V: 900 s budget — no HTTP connection held open
+    loop until the document appears
+        B->>W: GET /documents
+        W->>V: ListVectors
+        W-->>B: document list
+    end
+```
+
+Because ingestion is asynchronous, "upload returned" doesn't mean "ready to query" — hence the polling loop. Chunk ids key on the document *name*, not the staging path, so re-uploading the same file is a no-op rather than a duplicate set.
 
 | Component | Configuration |
 |---|---|
