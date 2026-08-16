@@ -5,7 +5,7 @@ A serverless-ready Retrieval-Augmented Generation app on AWS: upload PDFs, ask q
 Flask · Amazon S3 Vectors · Amazon Bedrock (Titan embeddings + Llama 4) · Terraform
 
 <!-- deploy:url -->
-*Not currently deployed — see [Deploy publicly](#deploy-publicly) to launch it in three commands.*
+**[Live demo →](https://2y5mc2diynm6gdhw73r5gr5try0rfanw.lambda-url.us-east-1.on.aws/)**
 <!-- /deploy:url -->
 
 ![Screenshot](data/Screenshot.png)

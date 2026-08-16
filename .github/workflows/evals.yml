@@ -33,6 +33,12 @@ jobs:
       - name: Import check
         run: uv run python -c "import ast,pathlib; [ast.parse(pathlib.Path(f).read_text()) for f in ['app.py','ingest.py','populate_database.py','get_embedding_function.py','test_rag.py']]"
       - uses: hashicorp/setup-terraform@v3
+      - name: Placeholder deployment package
+        # `terraform validate` evaluates filebase64sha256(local.package), and the
+        # real zip is a gitignored 29 MB build artifact. Building it here would
+        # install the whole linux dependency tree just to hash bytes we discard,
+        # so an empty file is enough to let validation proceed.
+        run: mkdir -p deploy && touch deploy/app.zip
       - name: Terraform fmt + validate
         working-directory: infra
         run: terraform init -backend=false && terraform fmt -check && terraform validate
