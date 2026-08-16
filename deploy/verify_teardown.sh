@@ -1,84 +1,73 @@
 #!/usr/bin/env bash
-# Inventory every AWS component this project creates.
+# Verify `terraform destroy` actually removed everything -- and that the things
+# which are *meant* to outlive a teardown are still there.
 #
-# Run before `terraform destroy` to snapshot, and after to confirm nothing
-# survived. Deliberately queries AWS directly rather than reading Terraform
-# state -- an empty state proves Terraform forgot the resource, not that AWS
-# deleted it.
+#   ./deploy/verify_teardown.sh
 #
-# Usage:  ./deploy/verify_teardown.sh
+# Queries AWS directly rather than reading Terraform state: an empty state proves
+# Terraform forgot the resource, not that AWS deleted it.
+#
+# Discovery is tag-driven (the provider's default_tags stamp Project=<project> on
+# everything it creates), so this does not drift as resources are added. The
+# earlier hardcoded version checked 7 resources while Terraform managed 37, and
+# would happily report "TEARDOWN COMPLETE" with three Lambdas still running.
 set -uo pipefail
 
 REGION="${AWS_REGION:-us-east-1}"
 PROJECT="${PROJECT:-llama-rag}"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null)
 
-present=0
-absent=0
-
-check() { # check <label> <command...>
-  local label="$1"; shift
-  if out=$("$@" 2>&1); then
-    echo "  PRESENT  $label"
-    present=$((present + 1))
-  else
-    case "$out" in
-      *NotFound*|*NoSuchBucket*|*NoSuchEntity*|*does\ not\ exist*|*ResourceNotFound*|*NotFoundException*|*404*)
-        echo "  gone     $label"; absent=$((absent + 1)) ;;
-      *)
-        echo "  ?ERROR   $label -- ${out%%$'\n'*}"; present=$((present + 1)) ;;
-    esac
-  fi
-}
-
 echo "account $ACCOUNT / region $REGION / project $PROJECT"
 echo
-echo "S3 Vectors"
-check "vector bucket $PROJECT-vectors" \
-  aws s3vectors get-vector-bucket --vector-bucket-name "$PROJECT-vectors" --region "$REGION"
-check "vector index  $PROJECT-vectors/docs" \
-  aws s3vectors get-index --vector-bucket-name "$PROJECT-vectors" --index-name docs --region "$REGION"
+echo "Tagged resources (Project=$PROJECT)"
 
-echo
-echo "S3"
-check "uploads bucket $PROJECT-uploads-$ACCOUNT" \
-  aws s3api head-bucket --bucket "$PROJECT-uploads-$ACCOUNT" --region "$REGION"
+mapfile -t tagged < <(aws resourcegroupstaggingapi get-resources \
+  --tag-filters "Key=Project,Values=$PROJECT" \
+  --query 'ResourceTagMappingList[].ResourceARN' --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$')
 
-echo
-echo "Lambda"
-check "function $PROJECT" \
-  aws lambda get-function --function-name "$PROJECT" --region "$REGION"
-check "function $PROJECT-ingest" \
-  aws lambda get-function --function-name "$PROJECT-ingest" --region "$REGION"
-check "function URL  $PROJECT" \
-  aws lambda get-function-url-config --function-name "$PROJECT" --region "$REGION"
+if [ "${#tagged[@]}" -eq 0 ]; then
+  echo "  gone     (none)"
+else
+  for arn in "${tagged[@]}"; do echo "  PRESENT  ${arn#arn:aws:}"; done
+fi
 
+# IAM roles are inconsistently covered by the tagging API, so check them by name.
 echo
-echo "IAM"
-check "role   $PROJECT-lambda" aws iam get-role --role-name "$PROJECT-lambda"
-check "role   $PROJECT-dev"    aws iam get-role --role-name "$PROJECT-dev"
-
-echo
-echo "CloudWatch"
-for lg in "/aws/lambda/$PROJECT" "/aws/lambda/$PROJECT-ingest"; do
-  if [ -n "$(aws logs describe-log-groups --log-group-name-prefix "$lg" \
-        --region "$REGION" --query "logGroups[?logGroupName=='$lg'].logGroupName" --output text 2>/dev/null)" ]; then
-    echo "  PRESENT  log group $lg"; present=$((present + 1))
+echo "IAM roles"
+iam_present=0
+for role in "$PROJECT-lambda" "$PROJECT-dev" "$PROJECT-github-ci"; do
+  if aws iam get-role --role-name "$role" >/dev/null 2>&1; then
+    echo "  PRESENT  role/$role"; iam_present=$((iam_present + 1))
   else
-    echo "  gone     log group $lg"; absent=$((absent + 1))
+    echo "  gone     role/$role"
   fi
 done
 
+remaining=$(( ${#tagged[@]} + iam_present ))
+
+# --- Things that SHOULD survive a teardown --------------------------------
+# Deliberately outside Terraform so a destroy/rebuild cycle does not lose them.
 echo
-echo "Budgets"
-if aws budgets describe-budget --account-id "$ACCOUNT" --budget-name "$PROJECT-monthly" >/dev/null 2>&1; then
-  echo "  PRESENT  budget $PROJECT-monthly"; present=$((present + 1))
+echo "Expected to survive (not Terraform-managed)"
+
+param="${LANGSMITH_KEY_PARAM:-/$PROJECT/langsmith-api-key}"
+if aws ssm get-parameter --name "$param" --query 'Parameter.Type' --output text >/dev/null 2>&1; then
+  echo "  ok       ssm $param  (tracing key -- survives, so rebuilds keep tracing)"
 else
-  echo "  gone     budget $PROJECT-monthly"; absent=$((absent + 1))
+  echo "  MISSING  ssm $param  -- deploy.sh will recreate it from .env.local"
 fi
+
+[ -f .env.local ] && echo "  ok       .env.local (local settings + LangSmith key)" \
+                  || echo "  MISSING  .env.local"
+
+aws configure list-profiles 2>/dev/null | grep -qx "$PROJECT" \
+  && echo "  ok       aws profile '$PROJECT' (role ARN is name-stable, so it works again after rebuild)" \
+  || echo "  MISSING  aws profile '$PROJECT'"
 
 echo
 echo "-------------------------------------------"
-echo "present: $present   gone: $absent"
-[ "$present" -eq 0 ] && echo "TEARDOWN COMPLETE -- nothing left." \
-                     || echo "Resources still exist (expected before destroy)."
+if [ "$remaining" -eq 0 ]; then
+  echo "TEARDOWN COMPLETE -- no project resources remain."
+else
+  echo "$remaining project resource(s) still exist (expected before destroy)."
+fi

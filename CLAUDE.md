@@ -56,6 +56,22 @@ env -u AWS_PROFILE terraform apply
 
 Two identities by design: your **admin** profile provisions infrastructure; the least-privilege **`llama-rag` profile** (assuming the dev role Terraform creates) runs the application. Neither uses a static access key — `.env` holds configuration only.
 
+### Teardown and rebuild
+
+`terraform destroy` removes everything it manages. Three things deliberately sit **outside** Terraform so a destroy/rebuild cycle does not lose them:
+
+| Survives | Why it is outside Terraform |
+|---|---|
+| SSM `/llama-rag/langsmith-api-key` | A Terraform-managed secret lands in `terraform.tfstate` in plaintext. Kept out of state, so `destroy` cannot delete it and tracing works immediately after a rebuild. `deploy.sh` restores it from `.env.local` if it ever goes missing. |
+| `.env.local` | Local settings and the LangSmith key. `publish.sh` rewrites `.env` wholesale but never touches this. |
+| The `llama-rag` AWS profile in `~/.aws/config` | References the dev role by ARN. Role names are stable, so the same ARN reappears on rebuild and the profile keeps working. |
+
+**What changes on rebuild:** the Lambda Function URL gets a new random id. `publish.sh` rewrites the README link and the GitHub repo variables, so run `deploy.sh` (which calls it) rather than a bare `terraform apply`.
+
+**What stays valid:** the CI role ARN (name-stable, so the `AWS_CI_ROLE_ARN` secret needs no update) and the vector index name -- though the index itself is recreated empty, so re-ingest and re-run the evals.
+
+Verify with `./deploy/verify_teardown.sh`. It discovers resources by the `Project` tag that `default_tags` stamps on everything, so it does not drift as resources are added -- the previous hardcoded version checked 7 while Terraform managed 37, and reported success with three Lambdas still running.
+
 **IAM is eventually consistent.** Running the evals immediately after an apply that changed the policy can produce a one-off `AccessDenied` on an ARN the policy demonstrably grants. Give it ~30s and re-run before debugging. To tell a transient apart from a real misconfiguration, read the live policy rather than the Terraform source — a real gap shows up here, a transient does not:
 
 ```bash

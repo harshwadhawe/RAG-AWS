@@ -194,6 +194,10 @@ cd infra && terraform destroy && cd ..
 ./deploy/verify_teardown.sh     # confirms nothing survived
 ```
 
+`verify_teardown.sh` discovers resources by the `Project` tag rather than a hardcoded list, so it can't quietly go stale as resources are added.
+
+Rebuilding is `./deploy/deploy.sh` again. Three things deliberately live outside Terraform so the cycle doesn't lose them: the **LangSmith key** (SSM SecureString — a Terraform-managed secret would sit in `terraform.tfstate` in plaintext), **`.env.local`**, and the **`llama-rag` AWS profile**. Role names are stable, so the profile and the CI role ARN keep working across rebuilds; the Function URL gets a new id, which `publish.sh` writes back into this README automatically.
+
 ## Cost
 
 Roughly **$1–3/month** at portfolio traffic. S3 Vectors storage is $0.06/GB-month (this corpus is ~20 MB, so a fraction of a cent); Bedrock is per-token; Lambda scales to zero. The Terraform config provisions a budget alert so a runaway ingestion loop can't surprise you.

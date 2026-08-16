@@ -16,6 +16,20 @@ cd "$(dirname "$0")/.."
 # .env selects; AWS_PROFILE in the environment would silently downgrade it.
 unset AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
+# The tracing key lives in SSM, deliberately outside Terraform so `destroy`
+# cannot delete it and a rebuild keeps tracing working. That also means nothing
+# recreates it if it is ever removed -- so restore it from .env.local here.
+PARAM="${LANGSMITH_KEY_PARAM:-/llama-rag/langsmith-api-key}"
+if ! aws ssm get-parameter --name "$PARAM" >/dev/null 2>&1; then
+  KEY=$(grep -s '^LANGSMITH_API_KEY=' .env.local | cut -d= -f2-)
+  if [ -n "$KEY" ]; then
+    aws ssm put-parameter --name "$PARAM" --type SecureString --value "$KEY" >/dev/null
+    echo "==> restored $PARAM from .env.local"
+  else
+    echo "!! $PARAM missing and no key in .env.local -- deployed tracing will be disabled"
+  fi
+fi
+
 echo "==> 1/3 build"
 ./deploy/build.sh
 
