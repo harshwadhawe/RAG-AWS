@@ -1,10 +1,8 @@
-pypdf
-langchain
-langchain-ollama
-langchain-chroma
-langchain-community
-chromadb # Vector storage
-pytest
+pypdf                    # PDF text extraction
+langchain-text-splitters # RecursiveCharacterTextSplitter (the one piece of langchain worth keeping)
+chromadb                 # Vector storage
+ollama                   # Embeddings + generation
 flask
 werkzeug
 Flask-WTF
+pytest

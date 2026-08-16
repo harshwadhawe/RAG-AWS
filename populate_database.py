@@ -1,85 +1,85 @@
 import os
 import shutil
-from langchain_community.document_loaders import PyPDFLoader
+from functools import lru_cache
+
+import chromadb
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from get_embedding_function import get_embedding_function
-from langchain_chroma import Chroma
+from pypdf import PdfReader
+
+from get_embedding_function import embed_texts
 
 CHROMA_PATH = "chroma"
+COLLECTION = "docs"
+
+
+@lru_cache(maxsize=1)
+def get_collection():
+    os.makedirs(CHROMA_PATH, exist_ok=True)
+    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    # embedding_function=None: we always pass embeddings in explicitly, which
+    # stops chroma from downloading and running its own default model.
+    return client.get_or_create_collection(COLLECTION, embedding_function=None)
+
 
 def clear_database():
+    get_collection.cache_clear()
     if os.path.exists(CHROMA_PATH):
         shutil.rmtree(CHROMA_PATH)
     os.makedirs(CHROMA_PATH, exist_ok=True)
 
-def calculate_chunk_ids(chunks):
-    last_page_id = None
-    current_chunk_index = 0
 
-    for chunk in chunks:
-        source = chunk.metadata.get("source")
-        page = chunk.metadata.get("page")
-        current_page_id = f"{source}:{page}"
-
-        # If the page ID is the same as the last one, increment the index.
-        if current_page_id == last_page_id:
-            current_chunk_index += 1
-        else:
-            current_chunk_index = 0
-
-        # Calculate the chunk ID.
-        chunk_id = f"{current_page_id}:{current_chunk_index}"
-        last_page_id = current_page_id
-
-        # Add it to the chunk's metadata.
-        chunk.metadata["id"] = chunk_id
-
-    return chunks
+def load_pages(filepath):
+    """Yield (page_number, text) for each page with extractable text."""
+    for page_number, page in enumerate(PdfReader(filepath).pages):
+        text = page.extract_text()
+        if text and text.strip():
+            yield page_number, text
 
 
-def process_pdfs_and_populate_database(filepaths):
-    # Load documents from the PDF files
-    # Ensure CHROMA_PATH exists
-    if not os.path.exists(CHROMA_PATH):
-        os.makedirs(CHROMA_PATH, exist_ok=True)
-    documents = []
-    for filepath in filepaths:
-        loader = PyPDFLoader(filepath)
-        documents.extend(loader.load())
-
-    # Split documents into chunks
-    text_splitter = RecursiveCharacterTextSplitter(
+def chunk_documents(filepaths):
+    """Split PDFs into chunks tagged with a stable `source:page:index` id."""
+    splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
         chunk_overlap=80,
         length_function=len,
     )
-    chunks = text_splitter.split_documents(documents)
+    for filepath in filepaths:
+        for page_number, text in load_pages(filepath):
+            for index, chunk in enumerate(splitter.split_text(text)):
+                yield {
+                    "id": f"{filepath}:{page_number}:{index}",
+                    "text": chunk,
+                    "metadata": {"source": filepath, "page": page_number},
+                }
 
-    # Calculate chunk IDs
-    chunks = calculate_chunk_ids(chunks)
 
-    # Create embeddings and store in Chroma
-    embedding_function = get_embedding_function()
-    db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_function)
+def process_pdfs_and_populate_database(filepaths):
+    collection = get_collection()
+    chunks = list(chunk_documents(filepaths))
+    if not chunks:
+        print("No extractable text found.")
+        return
 
-    # Check for existing IDs in the database
-    existing_items = db.get(include=[])  # IDs are always included by default
-    existing_ids = set(existing_items["ids"])
-
-    # Only add new chunks that don't exist in the DB
-    new_chunks = [chunk for chunk in chunks if chunk.metadata["id"] not in existing_ids]
-
-    if new_chunks:
-        print(f"Adding {len(new_chunks)} new chunks to the database.")
-        new_chunk_ids = [chunk.metadata["id"] for chunk in new_chunks]
-        db.add_documents(new_chunks, ids=new_chunk_ids)
-    else:
+    existing = set(collection.get(ids=[c["id"] for c in chunks], include=[])["ids"])
+    new = [c for c in chunks if c["id"] not in existing]
+    if not new:
         print("No new chunks to add.")
+        return
 
-    # Optional: Persist the database to disk
-    # db.persist()
+    print(f"Adding {len(new)} new chunks to the database.")
+    collection.add(
+        ids=[c["id"] for c in new],
+        documents=[c["text"] for c in new],
+        embeddings=embed_texts([c["text"] for c in new]),
+        metadatas=[c["metadata"] for c in new],
+    )
 
 
-if __name__ == "__main__":
-    # Optional: Add code here if you want to run this script independently.
-    pass
+def search(query_embedding, k=5):
+    """Return [(text, id, distance)] for the k nearest chunks."""
+    result = get_collection().query(
+        query_embeddings=[list(query_embedding)],
+        n_results=k,
+        include=["documents", "distances"],
+    )
+    return list(zip(result["documents"][0], result["ids"][0], result["distances"][0]))

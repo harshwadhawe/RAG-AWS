@@ -4,11 +4,9 @@ from flask import Flask, render_template, request, redirect, url_for, session
 from werkzeug.utils import secure_filename
 import os
 from flask import jsonify
-from populate_database import process_pdfs_and_populate_database, clear_database
-from get_embedding_function import get_embedding_function
-from langchain_chroma import Chroma
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_ollama import OllamaLLM
+import ollama
+from populate_database import process_pdfs_and_populate_database, clear_database, search
+from get_embedding_function import embed_query
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 
 app = Flask(__name__)
@@ -35,30 +33,17 @@ Answer the question based only on the following context:
 Answer the question based on the above context: {question}
 """
 
+LLM_MODEL = "llama3.2"
+
+
 def query_rag(query_text: str):
-    # Prepare the DB.
-    embedding_function = get_embedding_function()
-    db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_function)
+    results = search(embed_query(query_text), k=5)
 
-    # Search the DB.
-    results = db.similarity_search_with_score(query_text, k=5)
+    context_text = "\n\n---\n\n".join(text for text, _, _ in results)
+    prompt = PROMPT_TEMPLATE.format(context=context_text, question=query_text)
 
-    context_text = "\n\n---\n\n".join([doc.page_content for doc, _ in results])
-    prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
-    prompt = prompt_template.format(context=context_text, question=query_text)
-
-    model = OllamaLLM(model="llama3.2")
-    # model = OllamaLLM(
-    # model="llama3.2",
-    # temperature=0.7,
-    # max_tokens=512,
-    # top_p=0.9,
-    # repetition_penalty=1.1
-    # )
-
-    response_text = model.invoke(prompt)
-
-    sources = [doc.metadata.get("id", None) for doc, _ in results]
+    response_text = ollama.generate(model=LLM_MODEL, prompt=prompt)["response"]
+    sources = [chunk_id for _, chunk_id, _ in results]
 
     return response_text, sources
 
