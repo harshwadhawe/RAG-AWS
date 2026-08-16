@@ -21,8 +21,9 @@ VECTOR_INDEX = os.environ.get("VECTOR_INDEX", "docs")
 def _require_bucket():
     if not VECTOR_BUCKET:
         raise RuntimeError(
-            "VECTOR_BUCKET is not set. Run `terraform output -raw env_file > .env` "
-            "from infra/, or set it in the environment."
+            "VECTOR_BUCKET is not set — the app has not been pointed at any "
+            "infrastructure yet. Run ./deploy/deploy.sh (which writes .env), or "
+            "set VECTOR_BUCKET in the environment."
         )
 
 # S3 Vectors caps a single PutVectors request; batch well under it.

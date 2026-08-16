@@ -35,6 +35,9 @@ echo "==> 1/3 build"
 
 echo
 echo "==> 2/3 apply"
+# init is idempotent and cheap; running it here means a fresh clone needs one
+# command, and a provider added since the last init cannot fail the apply.
+terraform -chdir=infra init -input=false >/dev/null
 terraform -chdir=infra apply "$@"
 
 echo
