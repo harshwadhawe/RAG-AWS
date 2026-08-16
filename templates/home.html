@@ -16,9 +16,9 @@
     {% else %}
     <div class="button-container">
         <button onclick="location.href='{{ url_for('upload_page') }}';" class="btn">Add documents</button>
-        <form action="{{ url_for('reset_rag') }}" method="post" onsubmit="return confirm('Delete every indexed document? This cannot be undone.');" style="display:inline;">
+        <form action="{{ url_for('reset_rag') }}" method="post" onsubmit="return confirm('Delete all embeddings AND the uploaded PDFs? This cannot be undone.');" style="display:inline;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn btn-danger">Clear index</button>
+            <button type="submit" class="btn btn-danger">Clear everything</button>
         </form>
     </div>
 

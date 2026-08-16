@@ -17,6 +17,12 @@ from populate_database import process_pdfs_and_populate_database, search
 
 CORPUS = ["data/monopoly.pdf", "data/ticket_to_ride.pdf"]
 
+# The eval corpus lives in its own session namespace. Retrieval is filtered by
+# session, so visitor uploads to the live index cannot perturb these results --
+# and the scheduled cleanup only expires sessions that have S3 objects behind
+# them, which this one does not.
+EVAL_SESSION = "evals"
+
 # (question, substrings that must all appear in a correct answer)
 # Every expected value was verified to exist in the source PDFs.
 CASES = [
@@ -44,7 +50,7 @@ def normalize(text):
 
 @pytest.fixture(scope="session", autouse=True)
 def corpus():
-    process_pdfs_and_populate_database(CORPUS)
+    process_pdfs_and_populate_database(CORPUS, EVAL_SESSION)
 
 
 @pytest.mark.parametrize("question,expected", CASES, ids=lambda v: v[:40] if isinstance(v, str) else "")
@@ -55,7 +61,7 @@ def test_retrieval_surfaces_fact(question, expected):
     the chunk was retrieved and the model failed to use it. If both fail, the
     problem is embeddings/chunking/k, not generation.
     """
-    context = normalize(" ".join(text for text, _, _ in search(embed_query(question), k=5)))
+    context = normalize(" ".join(text for text, _, _ in search(embed_query(question), EVAL_SESSION, k=5)))
     assert any(normalize(e) in context for e in expected), (
         f"none of {expected} in the top-5 retrieved chunks"
     )
@@ -63,7 +69,7 @@ def test_retrieval_surfaces_fact(question, expected):
 
 @pytest.mark.parametrize("question,expected", CASES, ids=lambda v: v[:40] if isinstance(v, str) else "")
 def test_answer_contains_fact(question, expected):
-    answer, sources, _ = query_rag(question)
+    answer, sources, _ = query_rag(question, EVAL_SESSION)
     got = normalize(answer)
     assert sources, "retrieval returned no sources"
     # Multi-value expectations are alternatives (any one is a correct answer);
@@ -74,7 +80,7 @@ def test_answer_contains_fact(question, expected):
 
 
 def test_declines_when_answer_not_in_corpus():
-    answer, _, _ = query_rag(OUT_OF_SCOPE)
+    answer, _, _ = query_rag(OUT_OF_SCOPE, EVAL_SESSION)
     got = normalize(answer)
     assert "canberra" not in got, f"hallucinated an out-of-corpus fact: {answer!r}"
     assert any(m in got for m in DECLINE_MARKERS), (

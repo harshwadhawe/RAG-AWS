@@ -1,11 +1,12 @@
 # app.py
 
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, render_template, request, redirect, url_for, session
 from werkzeug.utils import secure_filename
 import json
 import os
 import tempfile
 import time
+import uuid
 from flask import jsonify
 import boto3
 from botocore.config import Config as BotoConfig
@@ -94,14 +95,27 @@ def _cost_usd(in_tokens, out_tokens, embed_tokens):
     )
 
 
-def query_rag(query_text: str):
+def current_session():
+    """Stable per-browser id, stored in Flask's signed session cookie.
+
+    Reuses the cookie that already exists for CSRF, so this costs no new
+    infrastructure. Signed with FLASK_SECRET_KEY, so a visitor cannot forge
+    another session's id and read their documents.
+    """
+    if 'sid' not in session:
+        session['sid'] = uuid.uuid4().hex[:16]
+        session.permanent = False
+    return session['sid']
+
+
+def query_rag(query_text: str, session_id: str):
     """Answer from the corpus. Returns (answer, source chunk ids, metrics)."""
     started = time.perf_counter()
 
     embedding = embed_query(query_text)
     embedded_at = time.perf_counter()
 
-    results = search(embedding, k=5)
+    results = search(embedding, session_id, k=5)
     searched_at = time.perf_counter()
 
     context_text = "\n\n---\n\n".join(text for text, _, _ in results)
@@ -133,6 +147,7 @@ def query_rag(query_text: str):
         'cost_usd': _cost_usd(usage.get('inputTokens', 0),
                               usage.get('outputTokens', 0), embed_tokens),
         'model': LLM_MODEL,
+        'session': session_id,
     }
     # One structured line per query: CloudWatch Logs Insights can aggregate p95
     # latency and cost per model directly off this without extra instrumentation.
@@ -142,25 +157,40 @@ def query_rag(query_text: str):
 
 @app.route('/', methods=['GET', 'POST'])
 def home():
-    # The index is the single source of truth for "are there documents". No
-    # session flag, no local directory listing -- so every instance renders the
-    # same page for the same corpus, which is what makes this deployable behind
-    # a scale-to-zero, many-instance runtime.
-    uploaded_files = list_sources()
+    # The index is the source of truth for "are there documents", scoped to this
+    # visitor's session. No server-side state: the id rides in a signed cookie,
+    # so any instance can serve any request.
+    sid = current_session()
+    uploaded_files = list_sources(sid)
 
     if uploaded_files and request.method == 'POST':
         question = request.form['question']
-        response, sources, _ = query_rag(question)
+        response, sources, _ = query_rag(question, sid)
         return render_template('home.html', embeddings_created=True, response=response,
                                sources=sources, question=question, uploaded_files=uploaded_files)
 
     return render_template('home.html', embeddings_created=bool(uploaded_files),
                            uploaded_files=uploaded_files)
 
+def build_version():
+    """Commit the running code was built from, stamped by deploy/build.sh."""
+    try:
+        with open(os.path.join(os.path.dirname(__file__), 'VERSION')) as fh:
+            return fh.read().strip()
+    except FileNotFoundError:
+        return 'dev'
+
+
+@app.route('/health')
+def health():
+    """Liveness plus the deployed build id, so a stale deploy is detectable."""
+    return jsonify({'status': 'ok', 'version': build_version(), 'model': LLM_MODEL})
+
+
 @app.route('/documents')
 def documents():
     """Polled by the upload page to watch ingestion complete."""
-    return jsonify({'documents': list_sources()})
+    return jsonify({'documents': list_sources(current_session())})
 
 
 @app.route('/upload_url', methods=['POST'])
@@ -186,7 +216,7 @@ def upload_url():
                       config=BotoConfig(signature_version='s3v4'))
     presigned = s3.generate_presigned_post(
         Bucket=UPLOAD_BUCKET,
-        Key=f'incoming/{filename}',
+        Key=f'incoming/{current_session()}/{filename}',
         Fields={'Content-Type': 'application/pdf'},
         Conditions=[
             {'Content-Type': 'application/pdf'},
@@ -215,19 +245,46 @@ def upload():
             filepath = os.path.join(staging, secure_filename(file.filename))
             file.save(filepath)
             filepaths.append(filepath)
-        process_pdfs_and_populate_database(filepaths)
+        process_pdfs_and_populate_database(filepaths, current_session())
 
     return redirect(url_for('home'))
 
+def clear_uploads(session_id=None):
+    """Delete the raw PDFs backing the index. Returns the count removed.
+
+    Clearing vectors alone leaves the source files in S3, which is a confusing
+    half-state: the documents vanish from search but still occupy the bucket
+    until the 7-day lifecycle rule expires them, and nothing re-ingests them
+    because S3 events only fire on new objects.
+    """
+    if not UPLOAD_BUCKET:
+        return 0
+
+    prefix = f'incoming/{session_id}/' if session_id else 'incoming/'
+    s3 = boto3.client('s3', region_name=REGION)
+    removed = 0
+    for page in s3.get_paginator('list_objects_v2').paginate(
+            Bucket=UPLOAD_BUCKET, Prefix=prefix):
+        objects = [{'Key': o['Key']} for o in page.get('Contents', [])]
+        if objects:
+            s3.delete_objects(Bucket=UPLOAD_BUCKET, Delete={'Objects': objects})
+            removed += len(objects)
+    return removed
+
+
 @app.route('/reset_rag', methods=['POST'])
 def reset_rag():
-    clear_database()
+    sid = current_session()
+    vectors = clear_database(sid)
+    files = clear_uploads(sid)
+    print(json.dumps({'event': 'reset', 'session': sid,
+                      'vectors_deleted': vectors, 'files_deleted': files}))
     return redirect(url_for('home'))
 
 @app.route('/ask_question', methods=['POST'])
 def ask_question():
     question = request.form['question']
-    response, sources, metrics = query_rag(question)
+    response, sources, metrics = query_rag(question, current_session())
     return jsonify({'response': response, 'sources': sources, 'metrics': metrics})
 
 

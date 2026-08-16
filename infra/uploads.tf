@@ -117,10 +117,79 @@ resource "aws_iam_role_policy" "uploads" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
-      Resource = "${aws_s3_bucket.uploads.arn}/incoming/*"
-    }]
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+        Resource = "${aws_s3_bucket.uploads.arn}/incoming/*"
+      },
+      {
+        # ListBucket is on the bucket ARN, not the object path -- required to
+        # enumerate objects before deleting them ("Clear index" removes the raw
+        # PDFs too). Scoped to the incoming/ prefix.
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.uploads.arn
+        Condition = {
+          StringLike = { "s3:prefix" = ["incoming/*"] }
+        }
+      },
+    ]
   })
+}
+
+# --- Scheduled session expiry ----------------------------------------------
+
+# S3 lifecycle is day-granular and DynamoDB TTL is best-effort within ~48h, so
+# neither can express an hour-scale retention policy. A scheduled sweep can.
+resource "aws_lambda_function" "cleanup" {
+  function_name = "${var.project}-cleanup"
+  role          = aws_iam_role.lambda.arn
+  architectures = ["arm64"]
+  runtime       = "python3.13"
+
+  filename         = local.package
+  source_code_hash = filebase64sha256(local.package)
+  handler          = "ingest.cleanup_handler"
+
+  memory_size = 512
+  timeout     = 300
+
+  environment {
+    variables = {
+      VECTOR_BUCKET       = aws_s3vectors_vector_bucket.main.vector_bucket_name
+      VECTOR_INDEX        = aws_s3vectors_index.docs.index_name
+      UPLOAD_BUCKET       = aws_s3_bucket.uploads.bucket
+      EMBED_MODEL         = local.titan_model_id
+      EMBED_DIMENSION     = tostring(var.embedding_dimension)
+      SESSION_TTL_MINUTES = tostring(var.session_ttl_minutes)
+    }
+  }
+
+  depends_on = [aws_cloudwatch_log_group.cleanup]
+}
+
+resource "aws_cloudwatch_log_group" "cleanup" {
+  name              = "/aws/lambda/${var.project}-cleanup"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_event_rule" "cleanup" {
+  name = "${var.project}-cleanup"
+  # Sweeps more often than the TTL so expiry is roughly on time rather than up
+  # to a full TTL late.
+  schedule_expression = "rate(15 minutes)"
+}
+
+resource "aws_cloudwatch_event_target" "cleanup" {
+  rule = aws_cloudwatch_event_rule.cleanup.name
+  arn  = aws_lambda_function.cleanup.arn
+}
+
+resource "aws_lambda_permission" "allow_eventbridge" {
+  statement_id  = "AllowExecutionFromEventBridge"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.cleanup.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.cleanup.arn
 }

@@ -27,6 +27,10 @@ def _require_bucket():
 # S3 Vectors caps a single PutVectors request; batch well under it.
 PUT_BATCH = 100
 
+# Explicit opt-out of session scoping. Only the scheduled cleanup and a full
+# index wipe should use it; the name is meant to be conspicuous in review.
+ALL_SESSIONS = None
+
 
 @lru_cache(maxsize=1)
 def _client():
@@ -38,15 +42,35 @@ def _index_args():
     return {"vectorBucketName": VECTOR_BUCKET, "indexName": VECTOR_INDEX}
 
 
-def clear_database():
-    """Delete every vector in the index. The index itself is managed by Terraform."""
+def delete_keys(keys, batch=200):
+    """Delete vectors by key. Returns the number removed."""
     client = _client()
-    while True:
-        page = client.list_vectors(**_index_args(), maxResults=500)
-        keys = [v["key"] for v in page.get("vectors", [])]
+    keys = list(keys)
+    for i in range(0, len(keys), batch):
+        client.delete_vectors(**_index_args(), keys=keys[i:i + batch])
+    return len(keys)
+
+
+def clear_database(session_id, max_rounds=200):
+    """Delete this session's vectors, or every vector when session_id is None.
+
+    Returns the number of vectors deleted. `session_id` is required; pass
+    ALL_SESSIONS to wipe the whole index.
+
+    Bounded rather than `while True`: list-after-delete is eventually consistent,
+    so a key that was just removed can still come back in the next listing. An
+    unbounded loop would spin on that until the Lambda timeout.
+    """
+    deleted = 0
+    for _ in range(max_rounds):
+        keys = [key for _, key in _scan(session_id)]
         if not keys:
-            return
-        client.delete_vectors(**_index_args(), keys=keys)
+            return deleted
+        deleted += delete_keys(keys)
+    raise RuntimeError(
+        f"index still returning vectors after {max_rounds} delete rounds "
+        f"({deleted} deleted); aborting rather than looping"
+    )
 
 
 def load_pages(filepath):
@@ -57,8 +81,13 @@ def load_pages(filepath):
             yield page_number, text
 
 
-def chunk_documents(filepaths):
-    """Split PDFs into chunks tagged with a stable `source:page:index` id."""
+def chunk_documents(filepaths, session_id):
+    """Split PDFs into chunks keyed `session:source:page:index`.
+
+    The session prefix keeps one visitor's documents out of another's results on
+    a public endpoint, and makes "delete everything this session uploaded" a
+    prefix operation rather than a search.
+    """
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
         chunk_overlap=80,
@@ -73,9 +102,16 @@ def chunk_documents(filepaths):
         for page_number, text in load_pages(filepath):
             for index, chunk in enumerate(splitter.split_text(text)):
                 yield {
-                    "id": f"{source}:{page_number}:{index}",
+                    "id": f"{session_id}:{source}:{page_number}:{index}",
                     "text": chunk,
-                    "metadata": {"source": source, "page": page_number},
+                    # session_id is *filterable* metadata. Only source_text was
+                    # declared non-filterable at index creation, and filterable
+                    # keys need no declaration -- so this needs no index rebuild.
+                    "metadata": {
+                        "source": source,
+                        "page": page_number,
+                        "session_id": session_id,
+                    },
                 }
 
 
@@ -89,8 +125,8 @@ def _existing_keys(keys):
     return found
 
 
-def process_pdfs_and_populate_database(filepaths):
-    chunks = list(chunk_documents(filepaths))
+def process_pdfs_and_populate_database(filepaths, session_id):
+    chunks = list(chunk_documents(filepaths, session_id))
     if not chunks:
         print("No extractable text found.")
         return
@@ -118,8 +154,8 @@ def process_pdfs_and_populate_database(filepaths):
         client.put_vectors(**_index_args(), vectors=vectors[i:i + PUT_BATCH])
 
 
-def list_sources():
-    """Distinct source documents currently in the index, sorted.
+def list_sources(session_id):
+    """Distinct source documents in the index, sorted. Scoped to one session.
 
     This is what makes the app stateless: "has the corpus been populated, and
     with what" is answered by the index itself rather than by a per-browser
@@ -130,19 +166,31 @@ def list_sources():
     if the index grows, keep a document manifest instead (a DynamoDB table or
     a single S3 object) and read that.
     """
-    client, sources, start = _client(), set(), None
+    return sorted({source for source, _ in _scan(session_id)})
+
+
+def _scan(session_id):
+    """Yield (source, key) for stored vectors, optionally one session's.
+
+    ListVectors has no server-side filter -- only QueryVectors does -- so the
+    session match happens client-side. This is why the manifest is the scaling
+    ceiling noted above.
+    """
+    client, start = _client(), None
     while True:
         kwargs = {**_index_args(), "maxResults": 500, "returnMetadata": True}
         if start:
             kwargs["nextToken"] = start
         page = client.list_vectors(**kwargs)
         for vector in page.get("vectors", []):
-            source = vector.get("metadata", {}).get("source")
-            if source:
-                sources.add(source)
+            meta = vector.get("metadata", {})
+            if session_id and meta.get("session_id") != session_id:
+                continue
+            if meta.get("source"):
+                yield meta["source"], vector["key"]
         start = page.get("nextToken")
         if not start:
-            return sorted(sources)
+            return
 
 
 # S3 Vectors is an approximate index and routinely returns FEWER than topK --
@@ -153,8 +201,16 @@ def list_sources():
 OVERFETCH = 4
 
 
-def search(query_embedding, k=5):
-    """Return [(text, key, distance)] for the k nearest chunks, best first."""
+def search(query_embedding, session_id, k=5):
+    """Return [(text, key, distance)] for the k nearest chunks, best first.
+
+    `session_id` is REQUIRED and positional. Pass ALL_SESSIONS to search across
+    every visitor -- deliberately ugly, because that is the unsafe case. A
+    default of None would mean a forgotten keyword silently answers one
+    visitor's question from another visitor's documents, which is precisely the
+    failure this scoping exists to prevent. Now it is a TypeError instead.
+    """
+    filters = {"session_id": session_id} if session_id else None
     response = _client().query_vectors(
         **_index_args(),
         queryVector={"float32": list(query_embedding)},
@@ -162,6 +218,7 @@ def search(query_embedding, k=5):
         returnDistance=True,
         # Requires s3vectors:GetVectors in addition to QueryVectors.
         returnMetadata=True,
+        **({"filter": filters} if filters else {}),
     )
     results = [
         (v["metadata"]["source_text"], v["key"], v.get("distance"))

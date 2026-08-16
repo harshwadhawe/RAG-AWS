@@ -32,6 +32,13 @@ jobs:
         run: uv venv && uv pip install -r requirements.txt
       - name: Import check
         run: uv run python -c "import ast,pathlib; [ast.parse(pathlib.Path(f).read_text()) for f in ['app.py','ingest.py','populate_database.py','get_embedding_function.py','test_rag.py']]"
+
+      # Runs against in-memory fakes, so it needs no AWS credentials and no
+      # deployed infrastructure -- which means real signal on every push even
+      # while the stack is torn down. Catches contract breaks and session-scoping
+      # regressions in under a second.
+      - name: Behaviour tests
+        run: uv run pytest test_behaviour.py -v --tb=short
       - uses: hashicorp/setup-terraform@v3
       - name: Placeholder deployment package
         # `terraform validate` evaluates filebase64sha256(local.package), and the

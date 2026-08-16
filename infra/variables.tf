@@ -70,3 +70,14 @@ variable "max_upload_mb" {
   type        = number
   default     = 64
 }
+
+variable "session_ttl_minutes" {
+  description = <<-EOT
+    How long a visitor's uploaded documents and their vectors survive after the
+    last upload. Enforced by a scheduled Lambda -- S3 lifecycle rules are
+    day-granular and DynamoDB TTL is best-effort within ~48h, so neither can
+    express an hour-scale policy.
+  EOT
+  type        = number
+  default     = 60
+}

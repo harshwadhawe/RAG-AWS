@@ -25,6 +25,11 @@ echo "==> adding application code"
 cp app.py ingest.py populate_database.py get_embedding_function.py "$BUILD/"
 cp -r templates static "$BUILD/"
 cp deploy/run.sh "$BUILD/"
+
+# Stamp the build so the running code can be identified. A deploy that silently
+# ships a stale zip is otherwise invisible -- Terraform sees an unchanged
+# source_code_hash, reports "no changes", and the old code keeps serving.
+git rev-parse --short HEAD > "$BUILD/VERSION" 2>/dev/null || echo "unknown" > "$BUILD/VERSION"
 chmod +x "$BUILD/run.sh"
 
 # pytest and its tree are test-only; they cost package size and cold start.
