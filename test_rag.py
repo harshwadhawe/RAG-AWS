@@ -1,8 +1,8 @@
 """Golden-set eval for the RAG pipeline.
 
 Run: uv run pytest test_rag.py -v
-Needs ollama running (`ollama run llama3.2`) and the data/ PDFs ingested;
-ingestion is idempotent, so the fixture below is safe to re-run.
+Needs AWS credentials in .env (see infra/) and Bedrock model access granted.
+Ingestion is idempotent, so the fixture below is safe to re-run.
 
 Each case is a real LLM call, so the suite takes a couple of minutes.
 """
@@ -12,7 +12,8 @@ import re
 import pytest
 
 from app import query_rag
-from populate_database import process_pdfs_and_populate_database
+from get_embedding_function import embed_query
+from populate_database import process_pdfs_and_populate_database, search
 
 CORPUS = ["data/monopoly.pdf", "data/ticket_to_ride.pdf"]
 
@@ -44,6 +45,20 @@ def normalize(text):
 @pytest.fixture(scope="session", autouse=True)
 def corpus():
     process_pdfs_and_populate_database(CORPUS)
+
+
+@pytest.mark.parametrize("question,expected", CASES, ids=lambda v: v[:40] if isinstance(v, str) else "")
+def test_retrieval_surfaces_fact(question, expected):
+    """Retrieval only -- no LLM call.
+
+    Splits the failure mode: if this passes and test_answer_contains_fact fails,
+    the chunk was retrieved and the model failed to use it. If both fail, the
+    problem is embeddings/chunking/k, not generation.
+    """
+    context = normalize(" ".join(text for text, _, _ in search(embed_query(question), k=5)))
+    assert any(normalize(e) in context for e in expected), (
+        f"none of {expected} in the top-5 retrieved chunks"
+    )
 
 
 @pytest.mark.parametrize("question,expected", CASES, ids=lambda v: v[:40] if isinstance(v, str) else "")

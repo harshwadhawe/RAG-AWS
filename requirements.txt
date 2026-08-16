@@ -1,7 +1,8 @@
 pypdf                    # PDF text extraction
 langchain-text-splitters # RecursiveCharacterTextSplitter (the one piece of langchain worth keeping)
-chromadb                 # Vector storage
-ollama                   # Embeddings + generation
+boto3                    # Titan embeddings, S3 Vectors, and Converse generation
+python-dotenv            # loads .env written by `terraform output`
+gunicorn                 # WSGI server behind the Lambda Web Adapter
 flask
 werkzeug
 Flask-WTF

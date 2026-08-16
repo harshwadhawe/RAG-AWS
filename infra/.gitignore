@@ -1,0 +1,6 @@
+# tfstate holds the IAM secret access key in plaintext -- never commit it.
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+.terraform.lock.hcl

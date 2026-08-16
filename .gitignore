@@ -4,3 +4,8 @@ backup
 chroma
 .venv/
 uploads/
+.env
+infra/.terraform/
+infra/*.tfstate*
+deploy/build/
+deploy/app.zip

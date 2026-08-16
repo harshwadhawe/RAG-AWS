@@ -1,57 +1,200 @@
-# LLAMA_LLM Chatbot
+# LLAMA_RAG
 
-## Creating an End-to-End Document RAG Model Locally
+A serverless-ready Retrieval-Augmented Generation app on AWS: upload PDFs, ask questions, get answers grounded in your own documents with citations back to the source chunk.
 
-This will be your project to create an end-to-end RAG model using your own documents with the use of Chroma locally. This application takes in PDF document uploads, creates document embeddings, and stores these in a vector database. Upon asking a question, it returns a set of relevant documents and uses the OllamaLLM model to generate a contextualized response.
+Flask · Amazon S3 Vectors · Amazon Bedrock (Titan embeddings + Llama 4) · Terraform
 
-A Flask application implementing Retrieval-Augmented Generation (RAG) using LangChain, Chroma, and OllamaLLM.
+**[Live demo →](https://24uz54fc76tlycbez5x2mbzhbu0knksh.lambda-url.us-east-1.on.aws/)**
 
-![Screenshot of LLAMA_LLM Chatbot](data/Screenshot.png)
+![Screenshot](data/Screenshot.png)
 
-## Features
+## Engineering highlights
 
-- **Upload PDFs:** Generate embeddings from your PDF documents.
-- **Ask Questions:** Get context-aware answers based on your uploaded content.
-- **Responsive Interface:** Seamless AJAX interactions without page reloads.
-- **Security:** Secure file uploads with CSRF protection.
+**The eval harness caught a silent retrieval bug in production.** S3 Vectors is an approximate index and returns *fewer results than requested* — measured at roughly half:
 
+| requested `topK` | actually returned |
+|---|---|
+| 5 | **2** |
+| 20 | 10 |
+| 100 | 40 (whole index) |
 
+So `k=5` was quietly supplying the model with **2 chunks of context instead of 5**, degrading every answer, with nothing in the app aware of it. It surfaced when the golden set failed on *retrieval* during an unrelated refactor. Fixed by over-fetching `k × 4` and re-ranking by distance — the mitigation AWS documents for this. ([full write-up](docs/DECISIONS.md#13-over-fetch-from-s3-vectors))
 
-## USAGE
-Upload Document:
-Upload your document(s) in PDF format through the web interface.
-The application processes and stores embeddings of your documents locally. 
+**Every significant choice is backed by a measurement, not a preference:**
 
-Ask Questions: Type your question in the input box for answers. 
+| Decision | Evidence |
+|---|---|
+| Llama 4 Scout for generation | 4 candidates scored against the golden set; chosen on latency once quality tied |
+| Removed LangChain, kept only the text splitter | 13 packages for a ~150-line app; replacement diff was +119/−108 lines |
+| Kept `langchain-text-splitters` | 2.9 MB of 305 MB — measured before deciding, not assumed |
+| S3 Vectors over OpenSearch Serverless | ~90% cheaper; vector lookup isn't the dominant latency term here |
+| 1024-dim embeddings (not 512) | Storage saving priced at ~$0.001/month against a permanently immutable index |
 
-The app retrieves relevant information from your documents and generates an answer. 
+**Production behaviour that isn't obvious from a tutorial:** Bedrock model access is account-level and diagnosable by testing with admin credentials · Llama 3.1+ is `INFERENCE_PROFILE`-only and needs wildcard-region IAM · `s3vectors:QueryVectors` alone can't return metadata · IAM is eventually consistent after an apply · Lambda's 6 MB invocation limit is why uploads go direct to S3.
 
-Local Processing: All data processing, and model inference are done locally in your machine. This guarantees data privacy, and you can work independently without relying on any external services.
+Dependencies went from **116 packages / 305 MB to 52 / 62 MB** — which is what made a zip-based Lambda deploy possible at all.
 
-## Installation
+## Architecture
 
-Requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
+```
+browser ──presigned POST──► S3 ──event──► ingest Lambda
+                                        │
+                     pypdf ──► chunk (800/80) ──► Titan Text Embeddings V2
+                                                            │
+                                                            ▼
+                                                   S3 Vectors index
+                                                    (1024-d, cosine)
+                                                            │
+question ──► Titan embed ──► top-k nearest ────────────────►┘
+                                   │
+                                   ▼
+                  Llama 4 Scout on Bedrock ──► grounded answer + sources
+```
 
-### Set up the environment and install libraries
+**Why S3 Vectors.** It is the cost-optimized tier, not the low-latency tier: AWS quotes ~100 ms for warm indexes and sub-second for cold ones, versus single-digit ms for an in-memory HNSW index — in exchange for roughly 90% lower cost than a traditional vector database. At this corpus size the vector lookup is nowhere near the dominant latency term (generation is), so the trade is free. A high-QPS consumer app would tier the hot subset into OpenSearch Serverless and keep the cold corpus here.
 
+**No LangChain, no SDK sprawl.** The pipeline calls `pypdf` and `boto3` directly — one AWS SDK covers embeddings, vector storage, and generation. The only third-party piece retained is `langchain-text-splitters`, the one component with non-trivial logic. Removing the rest took the install from **116 packages / 305 MB to 52 / 62 MB**, which is what makes a Lambda deployment viable.
+
+**Model chosen by measurement.** Four candidates were scored against the golden set before picking one:
+
+| Model | Score | Avg latency |
+|---|---|---|
+| `us.meta.llama4-scout-17b-instruct-v1:0` | 6/6 | **0.53s** |
+| `us.meta.llama4-maverick-17b-instruct-v1:0` | 6/6 | 0.53s |
+| `meta.llama3-70b-instruct-v1:0` | 6/6 | 0.69s |
+| `us.meta.llama3-3-70b-instruct-v1:0` | 6/6 | 0.82s |
+
+All four saturate the current golden set, so the choice came down to latency and cost — Scout is the cheapest of the two fastest. A set this small can't discriminate on quality; harder cases would be needed to justify a larger model.
+
+## Evals
+
+Retrieval quality is measured, not assumed. `test_rag.py` is a golden set of factual questions whose answers were verified to exist in the source PDFs, plus an out-of-corpus question that must be *declined* rather than answered.
+
+Each case runs twice — once against retrieval alone, once end-to-end — so a failure localizes immediately:
+
+| Retrieval | Answer | Diagnosis |
+|---|---|---|
+| ✅ | ❌ | Chunk was found; the model failed to use it |
+| ❌ | ❌ | Embeddings, chunking, or `k` — not generation |
+
+```bash
+uv run pytest test_rag.py -v                # full suite — 11 tests, ~6s
+uv run pytest test_rag.py -k retrieval      # no LLM calls
+```
+
+**Current state: 11/11 passing.** Run it before and after any change to the embedding model, chunk size, `k`, the prompt, or the vector store.
+
+`conftest.py` prints the resolved region, index, embedding model, and LLM in the pytest header — eval numbers mean nothing without knowing which model produced them — and warns when a shell environment variable is shadowing `.env`.
+
+## Setup
+
+Prerequisites: an AWS account, [Terraform](https://developer.hashicorp.com/terraform/install), [uv](https://docs.astral.sh/uv/getting-started/installation/), and admin AWS credentials configured (`aws configure`).
+
+**1. Provision infrastructure.** Creates the vector bucket and index, a least-privilege IAM user, and a monthly budget alert:
+
+```bash
+cd infra
+terraform init
+terraform apply -var="alert_email=you@example.com"
+terraform output -raw env_file > ../.env
+cd ..
+```
+
+Two credentials are in play by design: your **admin** profile provisions the infrastructure, and the least-privilege **app** user that Terraform creates runs the application. Don't `source .env` — it exports the app credentials into your shell, where they outrank the admin profile and cause Terraform to fail with `AccessDenied` on IAM. The app loads `.env` in-process via `python-dotenv`.
+
+Meta and Amazon Titan models need no Bedrock access request, so a bare `terraform apply` is sufficient. (Anthropic models require a one-time console opt-in — see [decision 6](docs/DECISIONS.md).)
+
+**2. Install and run:**
+
+```bash
 uv venv
-
 uv pip install -r requirements.txt
+uv run python app.py          # http://127.0.0.1:5000
+```
 
-### Parallely run OLLAMA in second terminal
+The home page reads the index directly, so if documents are already ingested you land straight on the chat UI — no upload needed, in any browser.
 
-Install OLLAMA locally first
+**3. Tear down** when you're finished — this deletes everything, including stored vectors:
 
-ollama pull nomic-embed-text
+```bash
+cd infra && terraform destroy
+```
 
-ollama run llama3.2
+## Cost
 
-Two models are needed: `nomic-embed-text` for document embeddings (chat models like llama3.2 have no embedding head) and `llama3.2` for generating answers.
+Roughly **$1–3/month** at portfolio traffic. S3 Vectors storage is $0.06/GB-month (this corpus is ~20 MB, so a fraction of a cent); Bedrock is per-token; Lambda scales to zero. The Terraform config provisions a budget alert so a runaway ingestion loop can't surprise you.
 
-### Run FLASK application
+## Notable implementation details
 
-uv run python app.py
+- **`force_destroy = true`** on the vector bucket — without it, `terraform destroy` fails while the index still holds vectors, and it only takes effect if applied beforehand.
+- **`s3vectors:GetVectors` is required alongside `QueryVectors`.** `QueryVectors` alone returns only keys and distances; requesting metadata (needed for chunk text) fails with AccessDenied otherwise.
+- **Index settings are immutable.** Dimension, distance metric, and non-filterable metadata keys cannot be changed — altering them rebuilds the index and drops every vector.
+- **Chunk text is non-filterable metadata.** Filterable metadata is capped at 2 KB/vector; `source` and `page` stay filterable for per-document queries.
+- **Llama 3.1+ requires the `us.` inference-profile prefix.** Those models are `INFERENCE_PROFILE`-only; a bare model id fails. The IAM policy needs `InvokeModel` on both the profile ARN and the underlying model with a wildcard region.
+- **Generation runs at `temperature=0`** — this is extraction from supplied context, not creative writing.
+- **Meta models need no access request.** Anthropic models on Bedrock require a one-time console opt-in and 403 until granted, which is why this defaults to Llama.
 
-(`uv run` uses `.venv` automatically — no activation needed.)
+## Deploy publicly
 
+```bash
+./deploy/build.sh                     # cross-compiles linux/arm64 wheels, ~29 MB zip
+cd infra && terraform apply
+terraform output -raw public_url
+```
 
+The build needs no Docker — `uv --python-platform aarch64-manylinux2014` produces Linux wheels on macOS. Re-deploy after a code change by re-running both commands; `source_code_hash` triggers the update.
+
+**Uploads bypass Lambda entirely.** The browser gets a presigned POST and sends the file straight to S3 (Lambda caps invocation payloads at 6 MB); an S3 event then triggers a separate ingestion Lambda with a 900 s timeout, so embedding a large PDF never blocks an HTTP request. Verified in production with a 7.3 MB PDF.
+
+**Architecture:** Flask runs unmodified under the [AWS Lambda Web Adapter](https://github.com/aws/aws-lambda-web-adapter) (an `/opt/extensions` layer), fronted by a Lambda **Function URL** — chosen over API Gateway because Function URLs support response streaming. The Lambda uses an execution role, so no AWS keys exist in the deployed environment.
+
+**This endpoint is public and unauthenticated, and every request spends Bedrock tokens.** `reserved_concurrent_executions = 5` bounds concurrent spend, alongside the budget alarm. Set `max_concurrency = 0` to disable the function without tearing anything down. For more than a demo, put CloudFront + WAF rate rules in front.
+
+## Stateless by design
+
+The app holds **no server-side state**, which is what makes it deployable across many short-lived instances:
+
+- "Which documents exist" is answered by querying the vector index, not a session flag or a local directory
+- Uploads are staged in a temp directory and discarded — the vectors are the durable artifact
+- Chunk ids key on the document *name*, not its staging path, so re-uploading is a no-op on any instance
+- Flask sessions are signed client-side cookies; CSRF survives cold starts because Terraform generates a stable `FLASK_SECRET_KEY`
+
+## Design decisions
+
+[`docs/DECISIONS.md`](docs/DECISIONS.md) records why each choice was made and the evidence behind it — including the ones that were wrong first (512-dimension embeddings, and an over-claim about which dependency actually drove cold-start size).
+
+## Status
+
+**Deployed and publicly reachable.** Verified end-to-end in production, including a 7.3 MB upload — above Lambda's 6 MB invocation limit — landing in the index ~40 s after upload.
+
+| | |
+|---|---|
+| Evals | 11/11 (5 retrieval, 5 answer, 1 refusal) |
+| Warm response | ~0.8 s end-to-end, including network |
+| Cold start | ~3.1 s init |
+| Dependencies | 52 packages / 62 MB (from 116 / 305 MB) |
+| Infrastructure | 26 Terraform resources, one-command teardown |
+| Cost | ~$1–3/month with a budget alarm |
+
+## Future work
+
+Ordered by value, with the reasoning in [`docs/ROADMAP.md`](docs/ROADMAP.md) alongside an honest gap analysis of what this project does and doesn't demonstrate.
+
+**Done**
+
+- [x] Deploy — Lambda Web Adapter + Function URL, arm64 zip, no Docker
+- [x] Stateless refactor — no session state, no local disk, index is the source of truth
+- [x] Async ingestion — presigned S3 upload + S3 event, off the request path
+
+**Next**
+
+- [ ] **Eval gate in CI** — run the golden set on every PR via GitHub Actions with OIDC (no long-lived keys), pass count in the job summary
+- [ ] **Per-request cost and latency accounting** — tokens in/out and dollar cost per query, surfaced rather than buried in CloudWatch
+- [ ] **Auth or rate limiting** — the endpoint is public and every request spends Bedrock tokens; concurrency caps bound throughput, not spend
+- [ ] **Reranking, measured** — `flashrank` cross-encoder, retrieve 20 → rerank to 5, with before/after eval scores
+- [ ] **Harder eval cases** — multi-hop and cross-chunk synthesis, plus a groundedness check. The current set is saturated by every model tested, so it can no longer discriminate on quality, which makes model selection unfalsifiable
+- [ ] **Agent layer** — query routing (retrieve vs. answer directly vs. decline), multi-step retrieve → synthesise → verify, or an MCP server over the corpus. The largest change in kind rather than degree
+- [ ] **Streaming responses** — infrastructure already supports it (Function URL `RESPONSE_STREAM`); only `/ask_question` needs to emit SSE, so time-to-first-token currently equals time-to-full-answer
+- [ ] **Per-document scoping in the UI** — `source` is already filterable metadata; the UI doesn't expose it, so every question searches the whole corpus
+
+**Deliberately not doing:** migrating off S3 Vectors (the cost/latency trade is correct at this scale and documented), reintroducing a framework (the removal is measured; adding one back for agent orchestration would need its own justification), or a frontend rewrite.
