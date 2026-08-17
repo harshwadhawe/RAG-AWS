@@ -154,3 +154,12 @@ a.btn {
     background: #c0392b;
     color: #fff;
 }
+
+/* Per-request latency/cost line under the answer. Subordinate to the answer:
+   it is evidence, not content. */
+.metrics {
+    margin-top: 0.75rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    color: #777;
+}

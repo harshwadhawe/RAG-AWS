@@ -13,11 +13,24 @@ Every test here corresponds to a failure this project actually shipped.
 """
 
 import io
+import json
 
 
 def upload(client, name, content=b"%PDF-1.4 fake"):
     return client.post("/upload", data={"pdf_files": (io.BytesIO(content), name)},
                        content_type="multipart/form-data", follow_redirects=True)
+
+
+def ask(client, question):
+    """Post a question and drain the SSE stream. Returns (answer, done payload)."""
+    response = client.post("/ask_question", data={"question": question})
+    assert response.mimetype == "text/event-stream", response.mimetype
+    events = [json.loads(line[len("data: "):])
+              for line in response.get_data(as_text=True).splitlines()
+              if line.startswith("data: ")]
+    assert "error" not in events[-1], events[-1]
+    answer = "".join(e["token"] for e in events if "token" in e)
+    return answer, events[-1]["done"]
 
 
 # --- Documents are visible to the session that uploaded them ----------------
@@ -58,10 +71,10 @@ def test_answers_are_grounded_only_in_this_sessions_documents(client):
     # Given a visitor with one document
     upload(client, "mine.pdf")
     # When they ask a question
-    body = client.post("/ask_question", data={"question": "what is this?"}).get_json()
+    _, done = ask(client, "what is this?")
     # Then every citation belongs to their own session
-    assert body["sources"], "expected citations"
-    assert all("mine.pdf" in s for s in body["sources"])
+    assert done["sources"], "expected citations"
+    assert all("mine.pdf" in s for s in done["sources"])
 
 
 # --- Reset ------------------------------------------------------------------
@@ -130,6 +143,20 @@ def test_non_pdf_uploads_are_rejected_before_reaching_s3(client, monkeypatch):
 
 def test_every_answer_reports_its_cost_and_latency(client):
     upload(client, "doc.pdf")
-    metrics = client.post("/ask_question", data={"question": "hi"}).get_json()["metrics"]
-    for field in ("total_ms", "input_tokens", "output_tokens", "chunks_retrieved", "model"):
-        assert field in metrics, f"missing {field}"
+    _, done = ask(client, "hi")
+    for field in ("total_ms", "first_token_ms", "input_tokens", "output_tokens",
+                  "chunks_retrieved", "model"):
+        assert field in done["metrics"], f"missing {field}"
+
+
+# --- Streaming --------------------------------------------------------------
+# Generation is ~0.7s of a ~0.8s request; buffering it into one response makes
+# the whole wait invisible until it is over.
+
+def test_the_answer_arrives_as_tokens_before_the_metrics(client):
+    upload(client, "doc.pdf")
+    answer, done = ask(client, "what is this?")
+    # Assembled from deltas, not one blob -- the fake emits two.
+    assert answer == "a grounded answer"
+    # Token counts only exist once generation ends, so they must trail the text.
+    assert done["metrics"]["output_tokens"] == 5

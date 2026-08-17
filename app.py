@@ -1,6 +1,7 @@
 # app.py
 
-from flask import Flask, render_template, request, redirect, url_for, session
+from flask import (Flask, Response, render_template, request, redirect, url_for,
+                   session, stream_with_context)
 from werkzeug.utils import secure_filename
 import json
 import os
@@ -124,21 +125,61 @@ def current_session():
     return session['sid']
 
 
-@traceable(run_type="llm", name="bedrock_converse")
+def _trace_deltas(chunks):
+    """Collapse the yielded deltas into one readable LangSmith output.
+
+    `chunks` is not just what was yielded: @traceable appends the generator's
+    return value (here, the usage dict) to the same list, so an unfiltered
+    ''.join() raises inside the tracer.
+    """
+    return {'output': ''.join(c for c in chunks if isinstance(c, str))}
+
+
+@traceable(run_type="llm", name="bedrock_converse", reduce_fn=_trace_deltas)
 def _generate(prompt: str):
-    """The model call, as its own span so tokens and latency attribute to it."""
-    return bedrock.converse(
+    """The model call, as its own span so tokens and latency attribute to it.
+
+    Yields text deltas and *returns* the usage totals, which only arrive in the
+    final metadata event -- so the caller reads them with
+    `usage = yield from _generate(prompt)` rather than from a yielded item.
+
+    converse_stream, not converse: generation is ~0.7 s of a ~0.8 s request and
+    with converse none of it is visible until all of it is done. The call shape
+    is the same, so swapping LLM_MODEL across providers still works.
+    """
+    usage = {}
+    response = bedrock.converse_stream(
         modelId=LLM_MODEL,
         messages=[{"role": "user", "content": [{"text": prompt}]}],
         # temperature 0: this is extraction from supplied context, not creative
         # writing -- we want the same answer for the same retrieved chunks.
         inferenceConfig={"maxTokens": 1024, "temperature": 0},
     )
+    for event in response["stream"]:
+        if "contentBlockDelta" in event:
+            yield event["contentBlockDelta"]["delta"]["text"]
+        elif "metadata" in event:
+            usage = event["metadata"].get("usage", {})
+    return usage
 
 
-@traceable(run_type="chain", name="query_rag")
-def query_rag(query_text: str, session_id: str):
-    """Answer from the corpus. Returns (answer, source chunk ids, metrics)."""
+def _trace_answer(chunks):
+    """Collapse the yielded stream into one readable LangSmith output.
+
+    Without this the chain's output is the raw list of yielded dicts.
+    """
+    return {'answer': ''.join(c['token'] for c in chunks if 'token' in c)}
+
+
+@traceable(run_type="chain", name="query_rag", reduce_fn=_trace_answer)
+def query_rag_stream(query_text: str, session_id: str):
+    """Answer from the corpus, a token at a time.
+
+    Yields `{'token': text}` per delta, then exactly one
+    `{'done': {'sources': [...], 'metrics': {...}}}`. Sources and metrics come
+    last because neither is complete until generation is: token counts arrive
+    with the final event, and total latency includes it.
+    """
     started = time.perf_counter()
 
     embedding = embed_query(query_text)
@@ -150,12 +191,20 @@ def query_rag(query_text: str, session_id: str):
     context_text = "\n\n---\n\n".join(text for text, _, _ in results)
     prompt = PROMPT_TEMPLATE.format(context=context_text, question=query_text)
 
-    response = _generate(prompt)
+    first_token_at = None
+    stream = _generate(prompt)
+    while True:
+        try:
+            delta = next(stream)
+        except StopIteration as end:
+            usage = end.value or {}
+            break
+        if first_token_at is None:
+            first_token_at = time.perf_counter()
+        yield {'token': delta}
     finished = time.perf_counter()
 
-    response_text = response["output"]["message"]["content"][0]["text"]
     sources = [chunk_id for _, chunk_id, _ in results]
-    usage = response.get("usage", {})
     # Titan bills the query embedding; roughly 4 chars per token.
     embed_tokens = max(1, len(query_text) // 4)
 
@@ -163,6 +212,8 @@ def query_rag(query_text: str, session_id: str):
         'embed_ms': round((embedded_at - started) * 1000, 1),
         'search_ms': round((searched_at - embedded_at) * 1000, 1),
         'generate_ms': round((finished - searched_at) * 1000, 1),
+        # The number streaming actually moves: everything else is unchanged.
+        'first_token_ms': round(((first_token_at or finished) - started) * 1000, 1),
         'total_ms': round((finished - started) * 1000, 1),
         'input_tokens': usage.get('inputTokens'),
         'output_tokens': usage.get('outputTokens'),
@@ -176,7 +227,21 @@ def query_rag(query_text: str, session_id: str):
     # latency and cost per model directly off this without extra instrumentation.
     print(json.dumps({'event': 'query', **metrics}))
 
-    return response_text, sources, metrics
+    yield {'done': {'sources': sources, 'metrics': metrics}}
+
+
+def query_rag(query_text: str, session_id: str):
+    """Blocking form. Returns (answer, source chunk ids, metrics).
+
+    The no-JS POST path and the evals want the whole answer, not a stream.
+    """
+    parts, done = [], {}
+    for chunk in query_rag_stream(query_text, session_id):
+        if 'token' in chunk:
+            parts.append(chunk['token'])
+        else:
+            done = chunk['done']
+    return ''.join(parts), done['sources'], done['metrics']
 
 @app.teardown_request
 def _flush_traces(exception=None):
@@ -330,9 +395,31 @@ def reset_rag():
 
 @app.route('/ask_question', methods=['POST'])
 def ask_question():
+    """Server-sent events: `{"token": "..."}` deltas, then one `{"done": {...}}`.
+
+    The Function URL is already RESPONSE_STREAM and the Lambda Web Adapter runs
+    in response_stream mode, so the deltas reach the browser as they are
+    produced rather than being buffered into one response.
+    """
     question = request.form['question']
-    response, sources, metrics = query_rag(question, current_session())
-    return jsonify({'response': response, 'sources': sources, 'metrics': metrics})
+    # Read the cookie now: the generator below runs after the view returns.
+    sid = current_session()
+
+    def events():
+        try:
+            for chunk in query_rag_stream(question, sid):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        except Exception as exc:
+            # The status line is long gone by the time this fires, so a failure
+            # mid-answer can only be reported inside the stream.
+            print(json.dumps({'event': 'ask_failed', 'error': str(exc)}))
+            yield f'data: {json.dumps({"error": "Something went wrong. Try again."})}\n\n'
+
+    # stream_with_context keeps the request context alive until the last event,
+    # so teardown_request -- the LangSmith flush -- runs after the spans close.
+    return Response(stream_with_context(events()), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache',
+                             'X-Accel-Buffering': 'no'})
 
 
 @app.route('/upload_page', methods=['GET'])

@@ -30,6 +30,8 @@ output "env_file" {
     EMBED_MODEL=${local.titan_model_id}
     EMBED_DIMENSION=${aws_s3vectors_index.docs.dimension}
     LLM_MODEL=${var.llm_model_id}
+    LLM_PRICE_IN_PER_1M=${var.llm_price_in_per_1m}
+    LLM_PRICE_OUT_PER_1M=${var.llm_price_out_per_1m}
   EOT
 }
 

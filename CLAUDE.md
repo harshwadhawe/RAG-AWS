@@ -90,12 +90,12 @@ Requires aws provider **>= 6.0** (`aws_s3vectors_*` resources; validated against
 ## Evals — run these before and after any retrieval change
 
 ```bash
-uv run pytest                          # everything: 21 tests
-uv run pytest test_behaviour.py        # 10 offline behaviour tests, ~0.3s, no AWS
+uv run pytest                          # everything: 22 tests
+uv run pytest test_behaviour.py        # 11 offline behaviour tests, ~0.3s, no AWS
 uv run pytest test_rag.py              # 11 golden-set tests against live AWS
 ```
 
-Current state: **21/21 passing**.
+Current state: **22/22 passing**.
 
 `test_behaviour.py` uses in-memory fakes (fixtures in `conftest.py`) patched onto the **`app` module namespace** -- the routes bind those names at import time, so patching `populate_database` would not affect them. Each test maps to a bug this project shipped; when adding one, verify it *fails* with the bug reintroduced before trusting it.
 
@@ -129,9 +129,21 @@ All AWS config comes from `.env`, written by `deploy/publish.sh` from Terraform 
 
 Two models, both on `bedrock-runtime`:
 - **Embeddings**: `amazon.titan-embed-text-v2:0` via `invoke_model`. Emits 1024 dims and **must match the index dimension exactly** — the index dimension is immutable.
-- **Generation**: `us.meta.llama4-scout-17b-instruct-v1:0` via the **Converse** API, at `temperature=0`.
+- **Generation**: `us.meta.llama4-scout-17b-instruct-v1:0` via **`converse_stream`**, at `temperature=0`.
 
 Converse is provider-agnostic — the same call shape serves Meta, Amazon, Mistral, and Anthropic — so changing `LLM_MODEL` in `.env` is the only edit needed to swap models. `invoke_model` would mean hand-building each provider's chat template.
+
+### Streaming
+
+`query_rag_stream()` yields `{'token': ...}` deltas and finally one `{'done': {sources, metrics}}`; `query_rag()` is the blocking consumer kept for the no-JS POST path and the evals. Nothing streams past `/ask_question` without all three of these:
+
+- `converse_stream` needs **`bedrock:InvokeModelWithResponseStream`** in addition to `InvokeModel` (already in `infra/main.tf`).
+- Usage totals arrive **only in the trailing `metadata` event**, so tokens, cost, and `total_ms` cannot be sent before the answer — they ride in the `done` frame. `_generate` returns them as a generator return value (`usage = yield from _generate(prompt)`).
+- The route wraps the generator in **`stream_with_context`**; without it the request context pops before the first token, and `teardown_request` (the LangSmith flush) runs too early.
+
+`@traceable` on a generator appends the generator's **return value to the same chunk list** it collects yields into, so a `reduce_fn` doing `''.join(chunks)` raises inside the tracer — filter by type (`_trace_deltas`).
+
+Infra was already streaming-ready: Function URL `invoke_mode = "RESPONSE_STREAM"` and `AWS_LWA_INVOKE_MODE = "response_stream"`. Measured locally: first token at 1.37 s, last at 1.83 s — 0.45 s of the wait made visible.
 
 ### Model IDs and the `us.` prefix
 
@@ -202,7 +214,7 @@ The only thing in the Flask cookie is `sid` (plus the CSRF token). "Which docume
 | Route | Purpose |
 |---|---|
 | `/` | Chat UI, or the empty state when the session has no documents |
-| `/ask_question` | POST, JSON — what the UI actually calls; returns answer, sources, metrics |
+| `/ask_question` | POST, SSE — what the UI actually calls; streams `{"token": ...}` deltas, then one `{"done": {sources, metrics}}` |
 | `/upload_page` | The presigned-upload UI |
 | `/upload_url` | POST — issues a presigned S3 POST scoped to `incoming/{sid}/` |
 | `/documents` | JSON list of this session's indexed documents; polled during ingestion |

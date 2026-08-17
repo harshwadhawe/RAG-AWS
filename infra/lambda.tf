@@ -80,12 +80,18 @@ resource "aws_lambda_function" "app" {
       AWS_LWA_PORT            = "8080"
 
       # No AWS keys: boto3 picks up the execution role automatically.
-      VECTOR_BUCKET    = aws_s3vectors_vector_bucket.main.vector_bucket_name
-      VECTOR_INDEX     = aws_s3vectors_index.docs.index_name
-      EMBED_MODEL      = local.titan_model_id
-      EMBED_DIMENSION  = tostring(var.embedding_dimension)
-      LLM_MODEL        = var.llm_model_id
-      UPLOAD_BUCKET    = aws_s3_bucket.uploads.bucket
+      VECTOR_BUCKET   = aws_s3vectors_vector_bucket.main.vector_bucket_name
+      VECTOR_INDEX    = aws_s3vectors_index.docs.index_name
+      EMBED_MODEL     = local.titan_model_id
+      EMBED_DIMENSION = tostring(var.embedding_dimension)
+      LLM_MODEL       = var.llm_model_id
+      UPLOAD_BUCKET   = aws_s3_bucket.uploads.bucket
+
+      # Token counts come from Bedrock; prices are configuration, so they ship
+      # with the deployment rather than being hardcoded next to the arithmetic.
+      LLM_PRICE_IN_PER_1M  = var.llm_price_in_per_1m
+      LLM_PRICE_OUT_PER_1M = var.llm_price_out_per_1m
+
       MAX_UPLOAD_MB    = tostring(var.max_upload_mb)
       FLASK_SECRET_KEY = random_password.flask_secret.result
 
@@ -107,8 +113,8 @@ resource "aws_lambda_function_url" "app" {
   function_name      = aws_lambda_function.app.function_name
   authorization_type = "NONE" # public
 
-  # API Gateway cannot stream responses; Function URLs can. Streaming is what
-  # makes generation latency feel acceptable once the UI sends tokens through.
+  # API Gateway cannot stream responses; Function URLs can. /ask_question emits
+  # SSE from converse_stream, so this is what carries the tokens as they land.
   invoke_mode = "RESPONSE_STREAM"
 }
 

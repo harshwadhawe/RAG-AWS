@@ -97,9 +97,15 @@ def store(monkeypatch):
     monkeypatch.setattr(web, "embed_query", lambda text: (0.0,) * 8)
 
     class FakeBedrock:
-        def converse(self, **kwargs):
-            return {"output": {"message": {"content": [{"text": "a grounded answer"}]}},
-                    "usage": {"inputTokens": 10, "outputTokens": 5}}
+        def converse_stream(self, **kwargs):
+            # Shaped like the real event stream: deltas first, usage only in the
+            # trailing metadata event -- which is why the app cannot report
+            # tokens or cost until generation finishes.
+            return {"stream": [
+                {"contentBlockDelta": {"delta": {"text": "a grounded "}}},
+                {"contentBlockDelta": {"delta": {"text": "answer"}}},
+                {"metadata": {"usage": {"inputTokens": 10, "outputTokens": 5}}},
+            ]}
 
     monkeypatch.setattr(web, "bedrock", FakeBedrock())
     return fake

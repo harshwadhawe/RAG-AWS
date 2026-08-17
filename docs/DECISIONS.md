@@ -12,7 +12,7 @@ The project started as a local Flask + LangChain + Chroma + Ollama demo and move
 
 **Why.** The starting app answered "How much money does each player start with in Monopoly?" with **$3,500**. The correct answer, present in the source PDF, is $1,500 — the PDF's OCR is garbled (`$100~`, `$50~`), so retrieval fed the model mangled denominations. Nothing in the app noticed. Every subsequent change (embedding model, vector store, LLM, framework removal) was going to alter answer quality, and without a baseline there would be no way to tell a regression from noise.
 
-**Evidence.** Every expected value was verified to exist in the corpus before being asserted on — an eval that asserts absent facts tests nothing. Baseline on the original stack: **6/6**. After removing LangChain: **6/6**. After migrating to AWS: **11/11**. Today, with the offline behaviour suite alongside it: **21/21**.
+**Evidence.** Every expected value was verified to exist in the corpus before being asserted on — an eval that asserts absent facts tests nothing. Baseline on the original stack: **6/6**. After removing LangChain: **6/6**. After migrating to AWS: **11/11**. Today, with the offline behaviour suite alongside it: **22/22**.
 
 **Consequence.** Every later decision could be settled by measurement instead of argument — most visibly the model choice (#7).
 
@@ -397,11 +397,31 @@ The flush adds a round-trip on the request path -- the deliberate cost of tracin
 
 ---
 
+## 22. Streaming, because the wait was already paid for
+
+Generation is ~0.7 s of a ~0.8 s request, and `converse` made all of it invisible: the user saw a spinner until the last token, then the whole answer at once. `converse_stream` shows the same work as it happens.
+
+**No infrastructure changed.** The Function URL was already `invoke_mode = "RESPONSE_STREAM"`, the adapter already `AWS_LWA_INVOKE_MODE = "response_stream"`, and the IAM policy already granted `bedrock:InvokeModelWithResponseStream` alongside `InvokeModel`. The gap was entirely in the application: one route returning one blob.
+
+**Evidence.** Live against Bedrock: 32 deltas, first at **1.37 s**, last at **1.83 s** — 0.45 s of the wait converted from blank screen into visible text, and `first_token_ms` is now recorded per query alongside the existing latency and cost fields.
+
+**Shape.** `/ask_question` emits SSE: `{"token": "..."}` per delta, then exactly one `{"done": {sources, metrics}}`. Citations and token counts trail the text because neither exists until generation ends — Bedrock reports usage only in the final `metadata` event. `query_rag()` remains as a blocking consumer of the same generator, so the no-JS POST path and all 11 golden-set tests kept working unchanged.
+
+Two traps, both found by running it:
+
+| Looks fine | Actually |
+|---|---|
+| Returning the generator from the view | The request context pops before the first token; `stream_with_context` is required, and it is also what keeps the LangSmith flush in `teardown_request` from firing early |
+| `reduce_fn=lambda chunks: ''.join(chunks)` | `@traceable` appends the generator's *return value* to the same list as its yields, so the usage dict lands in `chunks` and the join raises inside the tracer |
+
+**Not done:** cancelling generation when the browser disconnects. Bedrock bills the full completion either way at this scale.
+
+---
+
 ## Known open issues
 
 - **No auth or per-IP rate limiting** in front of endpoints that make paid AWS calls; reserved concurrency bounds throughput only (#15). Sessions isolate *data*, not *spend*.
 - **`list_sources()` scans all vector metadata** to answer "which documents exist". Fine for hundreds of documents; beyond that, keep a manifest in DynamoDB or a single S3 object.
 - **No per-document scoping in the UI.** Questions search everything in *your session*; `source` is already filterable metadata, the UI just doesn't expose a picker.
-- **The UI does not stream.** The infrastructure supports it (Function URL `RESPONSE_STREAM`), but `/ask_question` still returns a single JSON blob, so time-to-first-token is time-to-full-answer.
 - **No OCR.** Pages with no extractable text are skipped silently, so scanned PDFs contribute nothing.
 - **Root access keys.** The admin profile currently uses account root credentials, which AWS recommends deleting in favour of an IAM admin user.

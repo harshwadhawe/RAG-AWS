@@ -31,6 +31,26 @@ variable "llm_model_id" {
   default     = "us.meta.llama4-scout-17b-instruct-v1:0"
 }
 
+# Prices are per model and per region, so they cannot be derived from
+# llm_model_id. Defaults are the us-east-1 on-demand rates for the default
+# model, read from the Price List API rather than a docs page:
+#
+#   aws pricing get-products --region us-east-1 --service-code AmazonBedrock \
+#     --filters Type=TERM_MATCH,Field=regionCode,Value=us-east-1
+#
+# Leave either empty and the app reports cost as null rather than guessing.
+variable "llm_price_in_per_1m" {
+  description = "USD per 1M input tokens for llm_model_id."
+  type        = string
+  default     = "0.17"
+}
+
+variable "llm_price_out_per_1m" {
+  description = "USD per 1M output tokens for llm_model_id."
+  type        = string
+  default     = "0.66"
+}
+
 variable "alert_email" {
   description = "Email for the monthly cost alert. Leave empty to skip the budget."
   type        = string

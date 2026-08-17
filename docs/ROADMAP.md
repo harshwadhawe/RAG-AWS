@@ -27,7 +27,7 @@ The engineering narrative is the differentiator, not the application. Most portf
 | Session isolation | Strong | Server-side filtering, signed cookie, presigned key pinning; unsafe path is a TypeError |
 | Infrastructure | Strong | Terraform, least-privilege IAM, no static credentials anywhere (roles + OIDC) |
 | Cost engineering | Strong | 305 MB → 62 MB tied to a real constraint; budget alarm; per-request cost accounting; 60-min data expiry |
-| Observability | Strong | Nested LangSmith spans (chain/embedding/retriever/llm), per-query JSON metrics, `/health` build stamp |
+| Observability | Strong | Nested LangSmith spans (chain/embedding/retriever/llm), per-query JSON metrics surfaced in the UI, `/health` build stamp |
 | Documentation | Strong | Decision records including reversed decisions and shipped bugs |
 | Debugging evidence | Strong | Over-fetch discovery, OIDC immutable-id subjects, credential shadowing, IAM eventual consistency |
 | Eval depth | Moderate | 6 golden cases, saturated by every model tested; no groundedness metric |
@@ -35,7 +35,7 @@ The engineering narrative is the differentiator, not the application. Most portf
 | Security posture | Moderate | Sessions isolated, credentials short-lived; still no auth or rate limiting on a paid endpoint |
 | **Concept novelty** | **Weak** | Most saturated category in the field |
 | **Agentic capability** | **Absent** | Single-turn retrieve-and-generate; no tool use, routing, or multi-step reasoning |
-| Frontend | Weak | Functional, dated |
+| Frontend | Weak | Functional, dated; streams answers and shows per-request latency/cost |
 
 ## The strongest asset
 
@@ -53,7 +53,7 @@ GitHub Actions running `pytest test_rag.py` on every PR, with the pass count in 
 Needs an AWS role for GitHub OIDC (no long-lived keys) — itself a credible infrastructure detail.
 
 ### ~~2. Per-request cost and latency accounting~~ — done
-Log input/output tokens and dollar cost per query; surface a table in the README. Job descriptions name inference latency and token cost explicitly, and nothing currently measures either at request granularity.
+Input/output tokens, per-stage latency, and dollar cost per query, logged as JSON and shown under every answer in the UI. Job descriptions name inference latency and token cost explicitly, and nothing currently measures either at request granularity.
 
 ### 3. Authentication or rate limiting — ~1 hour
 Still the largest remaining gap. Session isolation stops visitors reading each other's documents, but anyone can still spend your Bedrock tokens. Reserved concurrency bounds throughput, not spend.
@@ -73,8 +73,8 @@ Multi-hop questions and ones requiring synthesis across chunks, plus a groundedn
 ### 6. An agent layer — 1–2 days
 The largest differentiation move, and the one that changes the *category* rather than the quality: query routing (retrieve vs. answer directly vs. decline), multi-step retrieve → synthesise → verify, or exposing the corpus as an MCP server. This is where the market has moved and where this project is currently silent.
 
-### 7. Streaming responses — ~3 hours
-Infrastructure already supports it (Function URL `RESPONSE_STREAM`); only `/ask_question` needs to emit SSE. Time-to-first-token currently equals time-to-full-answer.
+### ~~7. Streaming responses~~ — done
+`/ask_question` emits SSE from `converse_stream`. Infrastructure needed no change; first token at 1.37 s against 1.83 s for the full answer (#22).
 
 ### 8. Per-document scoping in the UI — ~2 hours
 `source` is already filterable metadata; the UI doesn't expose a picker, so a question searches every document in the session at once.

@@ -109,12 +109,12 @@ Two Lambda-specific details make it work: the key is read from SSM at cold start
 | ❌ | ❌ | embeddings, chunking, or `k` — not generation |
 
 ```bash
-uv run pytest                          # 21 tests
-uv run pytest test_behaviour.py        # 10 behaviour tests, 0.3s, no AWS
+uv run pytest                          # 22 tests
+uv run pytest test_behaviour.py        # 11 behaviour tests, 0.3s, no AWS
 uv run pytest test_rag.py              # 11 golden-set tests, live Bedrock + S3 Vectors
 ```
 
-**21/21 passing.** The behaviour suite runs against in-memory fakes, so it gives signal on every push even while the stack is torn down. Each of its tests maps to a bug this project actually shipped, and each was verified to *fail* when that bug is reintroduced — a suite that stays green on a broken app is worse than none.
+**22/22 passing.** The behaviour suite runs against in-memory fakes, so it gives signal on every push even while the stack is torn down. Each of its tests maps to a bug this project actually shipped, and each was verified to *fail* when that bug is reintroduced — a suite that stays green on a broken app is worse than none.
 
 `conftest.py` prints the resolved region, index, and models in the pytest header (eval numbers mean nothing without knowing which model produced them) and warns when a shell variable is shadowing `.env`.
 
@@ -187,7 +187,7 @@ Adds a `llama-rag` profile assuming the app's role, so local runs get exactly th
 
 ```bash
 uv venv && uv pip install -r requirements.txt
-uv run pytest                 # 21 tests
+uv run pytest                 # 22 tests
 uv run python app.py          # http://127.0.0.1:5001
 ```
 
@@ -218,7 +218,7 @@ Nothing sensitive is in the repo, in `.env`, or in `terraform.tfstate`.
 
 | | |
 |---|---|
-| Tests | 21/21 (10 behaviour offline, 11 golden set on live AWS) |
+| Tests | 22/22 (11 behaviour offline, 11 golden set on live AWS) |
 | Warm response | ~0.8 s end-to-end |
 | Cold start | ~3.1 s init |
 | Dependencies | 52 packages / 62 MB (from 116 / 305 MB) |
@@ -229,10 +229,8 @@ Nothing sensitive is in the repo, in `.env`, or in `terraform.tfstate`.
 
 Reasoning and an honest gap analysis in [`docs/ROADMAP.md`](docs/ROADMAP.md); why each choice was made — including the ones that were wrong first — in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
-- [ ] **Eval gate in CI** — golden set on every PR via OIDC, pass count in the job summary
 - [ ] **Harder eval cases** — every model tested saturates the current set, so it can no longer discriminate on quality, which makes model selection unfalsifiable
 - [ ] **Reranking, measured** — `flashrank` cross-encoder, retrieve 20 → rerank to 5, with before/after scores
-- [ ] **Streaming responses** — the Function URL already supports it; only `/ask_question` needs to emit SSE, so time-to-first-token currently equals time-to-full-answer
 - [ ] **Auth or rate limiting** — concurrency caps bound throughput, not spend
 - [ ] **Agent layer** — query routing, multi-step retrieve → synthesise → verify, or an MCP server over the corpus
 
